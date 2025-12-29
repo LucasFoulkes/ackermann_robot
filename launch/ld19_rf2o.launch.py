@@ -55,7 +55,7 @@ def generate_launch_description():
             {"port_name": port_name},
             {"port_baudrate": port_baudrate},
             {"laser_scan_dir": True},
-            {"enable_angle_crop_func": True},
+            {"enable_angle_crop_func": False},
             {"angle_crop_min": 135.0},
             {"angle_crop_max": 225.0},
         ],
@@ -73,7 +73,7 @@ def generate_launch_description():
         package="rf2o_laser_odometry",
         executable="rf2o_laser_odometry_node",
         name="rf2o",
-        output="log",
+        output="screen",
         arguments=['--ros-args', '--log-level', 'ERROR'],
         parameters=[
             {"laser_scan_topic": laser_scan_topic},

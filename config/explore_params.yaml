@@ -1,0 +1,19 @@
+explore:
+  ros__parameters:
+    robot_base_frame: base_link
+    costmap_topic: map
+    costmap_updates_topic: map_updates
+    visualize: true
+    planner_frequency: 0.33
+    progress_timeout: 30.0
+    potential_scale: 3.0
+    orientation_scale: 0.0
+    gain_scale: 1.0
+    transform_tolerance: 0.3
+    
+    # --- CRITICAL SETTINGS FOR ACKERMANN CARS ---
+    # 1.2 meters: Prevents the robot from chasing tiny gaps it can't fit into
+    min_frontier_size: 0.2
+    
+    # Must be true so it can plan into the "Grey" area to expand it
+    allow_unknown: true

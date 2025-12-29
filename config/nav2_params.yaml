@@ -216,20 +216,20 @@ global_costmap:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 20.0
+    expected_planner_frequency: 5.0
     use_sim_time: False
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
-      downsample_costmap: false
-      downsampling_factor: 1
+      downsample_costmap: true
+      downsampling_factor: 2
       tolerance: 0.25
       allow_unknown: true
-      max_iterations: 8000
-      max_on_approach_iterations: 1000
-      max_planning_time: 2.0
+      max_iterations: 20000
+      max_on_approach_iterations: 2000
+      max_planning_time: 5.0
       motion_model_for_search: "REEDS_SHEPP" # Allows reversing
-      angle_quantization_bins: 72
+      angle_quantization_bins: 64
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
       minimum_turning_radius: 1.05 # Updated for 0.37 rad steering limit
@@ -243,7 +243,7 @@ planner_server:
       debug_visualizations: true
       smooth_path: true
       smoother:
-        max_iterations: 1000
+        max_iterations: 500
         w_smooth: 0.3
         w_data: 0.2
         tolerance: 1e-10
