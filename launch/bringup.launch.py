@@ -29,16 +29,16 @@ def generate_launch_description():
         # parameters=[{"pwm_hz": 50.0}]
     )
 
-    # PS4 Teleop Node
-    ps4_teleop_node = Node(
+    # Cmd Vel Bridge Node
+    cmd_vel_bridge_node = Node(
         package="ackermann_robot",
-        executable="ps4_teleop",
-        name="ps4_teleop",
+        executable="cmd_vel_bridge",
+        name="cmd_vel_bridge",
         output="screen",
     )
 
     return LaunchDescription([
         ld19_rf2o_launch,
         ackermann_driver_node,
-        ps4_teleop_node,
+        cmd_vel_bridge_node,
     ])

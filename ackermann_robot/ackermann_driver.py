@@ -172,7 +172,7 @@ class AckermannDriver(Node):
         self.declare_parameter("steering_min", 205)
         self.declare_parameter("steering_center", 307)
         self.declare_parameter("steering_max", 410)
-        self.declare_parameter("invert_steering", True)
+        self.declare_parameter("invert_steering", False)
 
         # Throttle PWM range in PCA ticks (0..4095).
         # User requested min=20% (819) and max=40% (1638) of 4095.

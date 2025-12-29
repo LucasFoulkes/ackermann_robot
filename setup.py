@@ -15,6 +15,9 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.xml')),
+        (os.path.join('share', package_name, 'maps'), glob('maps/*.yaml')),
+        (os.path.join('share', package_name, 'maps'), glob('maps/*.pgm')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -31,6 +34,7 @@ setup(
         'console_scripts': [
             'ackermann_driver = ackermann_robot.ackermann_driver:main',
             'ps4_teleop = ackermann_robot.ps4_teleop:main',
+            'cmd_vel_bridge = ackermann_robot.cmd_vel_bridge:main',
         ],
     },
 )

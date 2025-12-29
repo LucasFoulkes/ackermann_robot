@@ -7,7 +7,9 @@
 /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/share/ament_index/resource_index/packages/ackermann_robot
 /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/share/ackermann_robot/package.xml
 /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/share/ackermann_robot/launch/bringup.launch.py
+/home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/share/ackermann_robot/launch/navigation.launch.py
 /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/share/ackermann_robot/launch/ld19_rf2o.launch.py
+/home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/share/ackermann_robot/config/nav2_params.yaml
 /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/share/ackermann_robot/config/slam_toolbox_online_async.yaml
 /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/python3.12/site-packages/ackermann_robot-0.0.0-py3.12.egg-info/dependency_links.txt
 /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/python3.12/site-packages/ackermann_robot-0.0.0-py3.12.egg-info/PKG-INFO

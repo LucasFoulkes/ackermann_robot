@@ -4,9 +4,11 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import math
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
+from geometry_msgs.msg import Twist
 
 
 class PCA9685:
@@ -183,10 +185,19 @@ class AckermannDriver(Node):
         # Safety / convenience
         self.declare_parameter("direction_change_brake_ms", 50.0)
 
+        # Nav2 / cmd_vel integration
+        self.declare_parameter("wheelbase", 0.25)  # meters
+        self.declare_parameter("max_steering_rad", 0.52)  # ~30 degrees
+        self.declare_parameter("max_speed", 1.0)  # m/s
+
         self._cmd_topic = str(self.get_parameter("cmd_topic").value)
         self._timeout_s = float(self.get_parameter("timeout_s").value)
         update_hz = float(self.get_parameter("update_hz").value)
         self._period_s = 1.0 / max(1.0, update_hz)
+
+        self._wheelbase = float(self.get_parameter("wheelbase").value)
+        self._max_steering_rad = float(self.get_parameter("max_steering_rad").value)
+        self._max_speed = float(self.get_parameter("max_speed").value)
 
         self._steer_map = AxisMapping(
             deadband=float(self.get_parameter("steering_deadband").value),
@@ -234,6 +245,7 @@ class AckermannDriver(Node):
         self._last_throttle_sign: int = 0
 
         self._sub = self.create_subscription(Float32MultiArray, self._cmd_topic, self._on_cmd, 10)
+        self._cmd_vel_sub = self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, 10)
         self._timer = self.create_timer(self._period_s, self._update_outputs)
 
         # Ensure safe outputs on startup
@@ -247,7 +259,6 @@ class AckermannDriver(Node):
         self._write_outputs(steering_cmd=0.0, throttle_cmd=0.0, reason="shutdown")
         if self._pca is not None:
             self._pca.close()
-
     def _on_cmd(self, msg: Float32MultiArray) -> None:
         if len(msg.data) < 2:
             self.get_logger().warn("/ackermann/cmd needs 2 floats: [steering, throttle]")
@@ -255,6 +266,29 @@ class AckermannDriver(Node):
         steering = float(msg.data[0])
         throttle = float(msg.data[1])
         self._last_cmd = (steering, throttle)
+        self._last_cmd_time = self.get_clock().now()
+
+    def _on_cmd_vel(self, msg: Twist) -> None:
+        v = msg.linear.x
+        omega = msg.angular.z
+
+        if abs(v) < 0.01:
+            steering_pct = 0.0
+            throttle_pct = 0.0
+        else:
+            # Ackermann kinematics: steering = atan(L * omega / v)
+            # Limit steering to max_steering_rad
+            raw_steering = math.atan(self._wheelbase * omega / v)
+            raw_steering = max(-self._max_steering_rad, min(self._max_steering_rad, raw_steering))
+            
+            # Map to -100..100
+            steering_pct = (raw_steering / self._max_steering_rad) * 100.0
+            
+            # Map speed to -100..100
+            throttle_pct = (v / self._max_speed) * 100.0
+            throttle_pct = max(-100.0, min(100.0, throttle_pct))
+
+        self._last_cmd = (steering_pct, throttle_pct)
         self._last_cmd_time = self.get_clock().now()
 
     def _update_outputs(self) -> None:

@@ -1,0 +1,23 @@
+running egg_info
+writing build/ackermann_robot/ackermann_robot.egg-info/PKG-INFO
+writing dependency_links to build/ackermann_robot/ackermann_robot.egg-info/dependency_links.txt
+writing entry points to build/ackermann_robot/ackermann_robot.egg-info/entry_points.txt
+writing requirements to build/ackermann_robot/ackermann_robot.egg-info/requires.txt
+writing top-level names to build/ackermann_robot/ackermann_robot.egg-info/top_level.txt
+reading manifest file 'build/ackermann_robot/ackermann_robot.egg-info/SOURCES.txt'
+writing manifest file 'build/ackermann_robot/ackermann_robot.egg-info/SOURCES.txt'
+running build
+running build_py
+copying ackermann_robot/ackermann_driver.py -> /home/luky/ros2_ws/src/ackermann_robot/build/ackermann_robot/build/lib/ackermann_robot
+running install
+running install_lib
+copying /home/luky/ros2_ws/src/ackermann_robot/build/ackermann_robot/build/lib/ackermann_robot/ackermann_driver.py -> /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/python3.12/site-packages/ackermann_robot
+byte-compiling /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/python3.12/site-packages/ackermann_robot/ackermann_driver.py to ackermann_driver.cpython-312.pyc
+running install_data
+running install_egg_info
+removing '/home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/python3.12/site-packages/ackermann_robot-0.0.0-py3.12.egg-info' (and everything under it)
+Copying build/ackermann_robot/ackermann_robot.egg-info to /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/python3.12/site-packages/ackermann_robot-0.0.0-py3.12.egg-info
+running install_scripts
+Installing ackermann_driver script to /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/ackermann_robot
+Installing ps4_teleop script to /home/luky/ros2_ws/src/ackermann_robot/install/ackermann_robot/lib/ackermann_robot
+writing list of installed files to '/home/luky/ros2_ws/src/ackermann_robot/build/ackermann_robot/install.log'

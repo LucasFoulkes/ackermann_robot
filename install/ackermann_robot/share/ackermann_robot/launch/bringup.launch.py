@@ -37,8 +37,16 @@ def generate_launch_description():
         output="screen",
     )
 
+    # Navigation
+    navigation_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(ackermann_share_dir, "launch", "navigation.launch.py")
+        )
+    )
+
     return LaunchDescription([
         ld19_rf2o_launch,
         ackermann_driver_node,
         ps4_teleop_node,
+        navigation_launch,
     ])
