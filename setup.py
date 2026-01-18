@@ -35,6 +35,9 @@ setup(
             'ackermann_driver = ackermann_robot.ackermann_driver:main',
             'ps4_teleop = ackermann_robot.ps4_teleop:main',
             'cmd_vel_bridge = ackermann_robot.cmd_vel_bridge:main',
+            'footprint_publisher = ackermann_robot.footprint_publisher:main',
+            'odom_rf2o_plot = ackermann_robot.odom_rf2o_plot:main',
+            'cmd_odom_diff = ackermann_robot.cmd_odom_diff:main',
         ],
     },
 )

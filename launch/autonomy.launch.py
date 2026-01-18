@@ -12,7 +12,7 @@ def generate_launch_description():
     # 1. Bringup (Sensors, Odom, Driver, Bridge, SLAM)
     # This launches:
     # - ldlidar_stl_ros2 (LiDAR)
-    # - rf2o_laser_odometry (Odom)
+    # - rf2o_laser_odometry (Odomg)
     # - slam_toolbox (SLAM / Map)
     # - ackermann_driver (Motors)
     # - cmd_vel_bridge (Twist -> Ackermann)

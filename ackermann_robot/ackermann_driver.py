@@ -154,7 +154,8 @@ class AckermannDriver(Node):
 
         # Topic / timing
         self.declare_parameter("cmd_topic", "/ackermann/cmd")
-        self.declare_parameter("timeout_s", 0.5)
+        # self.declare_parameter("timeout_s", 0.5)
+        self.declare_parameter("timeout_s", 30.0)
         self.declare_parameter("update_hz", 50.0)
 
         # Axis mappings (input is -100..100)

@@ -36,10 +36,14 @@ class DualShock4:
         self.cfg = config
         self.device = None
         self.axes = {
-            ecodes.ABS_X: 0,    # Left stick X
-            ecodes.ABS_Y: 0,    # Left stick Y
-            ecodes.ABS_RX: 0,   # Right stick X
-            ecodes.ABS_RY: 0,   # Right stick Y
+            ecodes.ABS_X: 0,    # Left Stick Horizontal (Steering)
+            ecodes.ABS_Y: 0,    # Left Stick Vertical
+            ecodes.ABS_RX: 0,   # Right Stick Horizontal
+            ecodes.ABS_RY: 0,   # Right Stick Vertical (Standard Throttle)
+            ecodes.ABS_Z: 0,    # L2 Trigger (Some controllers use this)
+            ecodes.ABS_RZ: 0,   # R2 Trigger (Often the REAL throttle axis)
+            ecodes.ABS_HAT0X: 0, # D-Pad Horizontal
+            ecodes.ABS_HAT0Y: 0, # D-Pad Vertical
         }
         self._abs_cache = {}
 
@@ -116,13 +120,22 @@ class DualShock4:
         return None
 
     def _prime_abs_cache(self):
-        """Cache absinfo for the four stick axes and print them once."""
-        axis_list = [ecodes.ABS_X, ecodes.ABS_Y, ecodes.ABS_RX, ecodes.ABS_RY]
+        """Cache absinfo for the axes and print them once. Also pre-fill axes with current values."""
+        axis_list = [
+            ecodes.ABS_X, ecodes.ABS_Y, 
+            ecodes.ABS_RX, ecodes.ABS_RY, 
+            ecodes.ABS_Z, ecodes.ABS_RZ, 
+            ecodes.ABS_HAT0X, ecodes.ABS_HAT0Y
+        ]
         names = {
             ecodes.ABS_X: "LX",
             ecodes.ABS_Y: "LY",
             ecodes.ABS_RX: "RX",
             ecodes.ABS_RY: "RY",
+            ecodes.ABS_Z: "L2",
+            ecodes.ABS_RZ: "R2",
+            ecodes.ABS_HAT0X: "HX",
+            ecodes.ABS_HAT0Y: "HY",
         }
 
         print("\nAxis absinfo (authoritative per-axis range/deadzone):")
@@ -130,9 +143,13 @@ class DualShock4:
             try:
                 ai = self.device.absinfo(code)
                 self._abs_cache[code] = ai
+
+                # FIX: Initialize the current value from the device so we don't start at 0 (which is -100%)
+                self.axes[code] = ai.value
+
                 print(
                     f"  {names[code]:>2} ({code:>3}) "
-                    f"min={ai.min:<4} max={ai.max:<4} flat={ai.flat:<4} fuzz={ai.fuzz:<4} res={ai.resolution}"
+                    f"min={ai.min:<4} max={ai.max:<4} val={ai.value:<4} flat={ai.flat:<4} fuzz={ai.fuzz:<4}"
                 )
             except Exception as e:
                 self._abs_cache[code] = None
@@ -204,17 +221,18 @@ class DualShock4:
                             self.axes[event.code] = event.value
 
                             # Many controllers report "up" as smaller raw values on Y axes.
-                            # Invert LY and RY so pushing up becomes +%.
-                            lx = self._scale_axis(ecodes.ABS_X, invert=False)
+                            lx = self._scale_axis(ecodes.ABS_X, invert=True)
                             ly = self._scale_axis(ecodes.ABS_Y, invert=True)
                             rx = self._scale_axis(ecodes.ABS_RX, invert=False)
+                            # Reverted to ABS_RY for throttle per your original requirement
                             ry = self._scale_axis(ecodes.ABS_RY, invert=True)
 
                             if callback:
                                 callback(lx, ly, rx, ry)
 
+                            # Print debug info for all axes to see what is happening
                             print(
-                                f"\rLX: {lx:>4}% | LY: {ly:>4}% | RX: {rx:>4}% | RY: {ry:>4}%",
+                                f"\rLX: {lx:>4}% | RY: {ry:>4}% | (Debug RZ: {self.axes.get(ecodes.ABS_RZ, 0):>3})",
                                 end="",
                                 flush=True,
                             )

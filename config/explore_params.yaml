@@ -5,15 +5,17 @@ explore:
     costmap_updates_topic: map_updates
     visualize: true
     planner_frequency: 2.0
-    progress_timeout: 30.0
+    progress_timeout: 60.0
+    # Higher potential_scale (e.g. 5.0) makes the robot prefer closer frontiers
     potential_scale: 3.0
     orientation_scale: 0.0
+    # Lower gain_scale (e.g. 0.5) makes the robot care less about the size of the frontier
     gain_scale: 1.0
     transform_tolerance: 0.3
     
     # --- CRITICAL SETTINGS FOR ACKERMANN CARS ---
     # 1.2 meters: Prevents the robot from chasing tiny gaps it can't fit into
-    min_frontier_size: 0.5
+    min_frontier_size: 0.35
     
     # Must be true so it can plan into the "Grey" area to expand it
     allow_unknown: true

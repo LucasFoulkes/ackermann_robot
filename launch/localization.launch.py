@@ -113,7 +113,7 @@ def generate_launch_description():
             DeclareLaunchArgument("odom_topic", default_value="/odom_rf2o"),
             DeclareLaunchArgument("publish_tf", default_value="true"),
             DeclareLaunchArgument("freq", default_value="10.0"),
-            DeclareLaunchArgument("x", default_value="0.2"),
+            DeclareLaunchArgument("x", default_value="0.23"),
             DeclareLaunchArgument("y", default_value="0"),
             DeclareLaunchArgument("z", default_value="0.18"),
             DeclareLaunchArgument("roll", default_value="0"),

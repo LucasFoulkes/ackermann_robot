@@ -1,3 +1,0 @@
-[console_scripts]
-ackermann_driver = ackermann_robot.ackermann_driver:main
-ps4_teleop = ackermann_robot.ps4_teleop:main

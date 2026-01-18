@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, TwistStamped
+from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray
 import math
 
@@ -16,31 +16,19 @@ class CmdVelBridge(Node):
         self.declare_parameter('max_steering_angle', 0.37) 
 
         # wheelbase: Distance between front and rear axles in meters
-        self.declare_parameter('wheelbase', 0.40)
+        self.declare_parameter('wheelbase', 0.27)
 
         self._max_speed = self.get_parameter('max_speed').value
         self._max_steering_angle = self.get_parameter('max_steering_angle').value
         self._wheelbase = self.get_parameter('wheelbase').value
 
-        # Subscribe to standard Twist (Teleop)
-        self.sub_twist = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
-        
-        # Subscribe to TwistStamped (Nav2)
-        self.sub_stamped = self.create_subscription(TwistStamped, 'cmd_vel_nav', self.cmd_vel_stamped_callback, 10)
+        self.sub = self.create_subscription(Twist, 'cmd_vel_nav', self.cmd_vel_callback, 10)
 
         self.pub = self.create_publisher(Float32MultiArray, '/ackermann/cmd', 10)
         
         self.get_logger().info(f"CmdVelBridge started. Max Speed={self._max_speed} m/s, Max Steer={self._max_steering_angle} rad, Wheelbase={self._wheelbase} m")
 
-    def cmd_vel_stamped_callback(self, msg):
-        # Extract Twist from TwistStamped and process
-        self.process_twist(msg.twist)
-
     def cmd_vel_callback(self, msg):
-        # Process Twist directly
-        self.process_twist(msg)
-
-    def process_twist(self, msg):
         v = msg.linear.x
         w = msg.angular.z
 

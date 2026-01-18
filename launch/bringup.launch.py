@@ -15,7 +15,7 @@ def generate_launch_description():
     # Include the existing LD19 + RF2O + SLAM launch file
     ld19_rf2o_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(ackermann_share_dir, "launch", "ld19_rf2o.launch.py")
+            os.path.join(ackermann_share_dir, "launch", "localization.launch.py")
         )
     )
 
