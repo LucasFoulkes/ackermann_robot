@@ -258,7 +258,7 @@ class PS4TeleopNode(Node):
         # User request: Left Joystick X (lx) -> Steering
         #               Right Joystick Y (ry) -> Motor
         msg = Float32MultiArray()
-        msg.data = [float(lx), float(ry)]
+        msg.data = [float(lx)/100.0, float(ry)/100.0]
         self.pub.publish(msg)
 
     def _worker(self):

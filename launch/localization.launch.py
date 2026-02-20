@@ -103,7 +103,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            DeclareLaunchArgument("port_name", default_value="/dev/ttyUSB0"),
+            DeclareLaunchArgument("port_name", default_value="/dev/ttyAMA0"),
             DeclareLaunchArgument("port_baudrate", default_value="230400"),
             DeclareLaunchArgument("scan_topic", default_value="scan"),
             DeclareLaunchArgument("laser_scan_topic", default_value="/scan"),

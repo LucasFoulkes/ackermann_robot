@@ -1,349 +1,255 @@
-from __future__ import annotations
-
-import time
-from dataclasses import dataclass
-from typing import Optional, Tuple
+#!/usr/bin/env python3
+import math
+from typing import Dict, Tuple
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 
-
-class PCA9685:
-    # Minimal PCA9685 driver over I2C (SMBus). No external Adafruit deps.
-
-    _MODE1 = 0x00
-    _MODE2 = 0x01
-    _PRESCALE = 0xFE
-    _LED0_ON_L = 0x06
-
-    def __init__(
-        self,
-        *,
-        bus: int,
-        address: int,
-        osc_clock_hz: float = 25_000_000.0,
-        pwm_hz: float = 50.0,
-    ) -> None:
-        self._address = address
-        self._osc_clock_hz = float(osc_clock_hz)
-
-        try:
-            try:
-                from smbus import SMBus  # type: ignore
-            except Exception:
-                from smbus2 import SMBus  # type: ignore
-        except Exception as e:  # pragma: no cover
-            raise RuntimeError(
-                "SMBus is required to talk to PCA9685. Install with: sudo apt install python3-smbus"
-            ) from e
-
-        self._SMBus = SMBus
-        self._bus = self._SMBus(bus)
-
-        # Reset MODE1 (sleep=0, auto-inc off)
-        self._write8(self._MODE1, 0x00)
-        time.sleep(0.01)
-
-        # MODE2: totem pole (OUTDRV)
-        self._write8(self._MODE2, 0x04)
-        time.sleep(0.01)
-
-        self.set_pwm_freq(pwm_hz)
-
-    def close(self) -> None:
-        try:
-            self._bus.close()
-        except Exception:
-            pass
-
-    def _write8(self, reg: int, value: int) -> None:
-        self._bus.write_byte_data(self._address, reg, value & 0xFF)
-
-    def _read8(self, reg: int) -> int:
-        return int(self._bus.read_byte_data(self._address, reg))
-
-    def set_pwm_freq(self, freq_hz: float) -> None:
-        freq_hz = float(freq_hz)
-        if freq_hz <= 0.0:
-            raise ValueError("pwm_hz must be > 0")
-
-        prescaleval = (self._osc_clock_hz / (4096.0 * freq_hz)) - 1.0
-        prescale = int(round(prescaleval))
-        prescale = max(3, min(255, prescale))
-
-        oldmode = self._read8(self._MODE1)
-        sleepmode = (oldmode & 0x7F) | 0x10  # sleep
-        self._write8(self._MODE1, sleepmode)
-        self._write8(self._PRESCALE, prescale)
-        self._write8(self._MODE1, oldmode)
-        time.sleep(0.005)
-        self._write8(self._MODE1, oldmode | 0xA1)  # restart + auto-inc
-
-    def set_pwm(self, channel: int, on: int, off: int) -> None:
-        if not (0 <= channel <= 15):
-            raise ValueError("channel must be 0..15")
-        if not (0 <= on <= 4095 and 0 <= off <= 4095):
-            raise ValueError("on/off must be 0..4095")
-
-        base = self._LED0_ON_L + 4 * channel
-        data = [on & 0xFF, (on >> 8) & 0x0F, off & 0xFF, (off >> 8) & 0x0F]
-        self._bus.write_i2c_block_data(self._address, base, data)
-
-    def set_duty(self, channel: int, duty: int) -> None:
-        duty = int(duty)
-        duty = max(0, min(4095, duty))
-
-        if duty == 0:
-            # Full off
-            self.set_pwm(channel, 0, 0)
-            return
-        if duty >= 4095:
-            # Full on
-            self.set_pwm(channel, 4095, 0)
-            return
-
-        self.set_pwm(channel, 0, duty)
+from adafruit_pca9685 import PCA9685
 
 
-@dataclass
-class AxisMapping:
-    deadband: float
-    cap: float
-
-
-@dataclass
-class SteeringPWM:
-    channel: int
-    min_tick: int
-    center_tick: int
-    max_tick: int
-    invert: bool
-
-
-@dataclass
-class ThrottlePWM:
-    fwd_channel: int
-    rev_channel: int
-    min_tick: int
-    max_tick: int
-    invert: bool
-
-
-def _apply_deadband(x: float, deadband: float) -> float:
-    if abs(x) < deadband:
+def n01(x) -> float:
+    try:
+        x = float(x)
+    except Exception:
         return 0.0
-    return x
-
-
-def _norm_with_cap(x: float, cap: float) -> float:
-    # Returns normalized magnitude 0..1 using cap threshold.
-    cap = float(cap)
-    if cap <= 0.0:
+    if not math.isfinite(x):
         return 0.0
-    return min(1.0, abs(x) / cap)
+    return -1.0 if x < -1.0 else 1.0 if x > 1.0 else x
 
 
-class AckermannDriver(Node):
+def sgn(x: float, eps: float) -> int:
+    eps = abs(float(eps))
+    return 1 if x > eps else -1 if x < -eps else 0
+
+
+def u16_from_tick12(t: int) -> int:
+    t = 0 if t < 0 else 4095 if t > 4095 else int(t)
+    if t == 0:
+        return 0
+    if t >= 4095:
+        return 0xFFFF
+    return t << 4
+
+
+def open_i2c(bus: int):
+    try:
+        from adafruit_extended_bus import ExtendedI2C as I2C
+        return I2C(int(bus))
+    except Exception:
+        import board
+        return board.I2C()
+
+
+class ActuatorDriver(Node):
+    NORMAL, HOLD = 0, 1
+
     def __init__(self) -> None:
-        super().__init__("ackermann_driver")
+        super().__init__("actuator_driver")
 
-        # I2C / PCA9685 params
-        self.declare_parameter("pwm_hz", 50.0)
-        self.declare_parameter("osc_clock_hz", 25_000_000.0)
+        P = {p.name: p.value for p in self.declare_parameters(
+            "",
+            [
+                # renamed default topic (less dumb)
+                ("cmd_topic", "/ackermann/driver/cmd"),
+                ("timeout_s", 10.0),
+                ("update_hz", 50.0),
 
-        # Topic / timing
-        self.declare_parameter("cmd_topic", "/ackermann/cmd")
-        # self.declare_parameter("timeout_s", 0.5)
-        self.declare_parameter("timeout_s", 30.0)
-        self.declare_parameter("update_hz", 50.0)
+                ("i2c_bus", 1),
+                ("i2c_address", 64),
+                ("pwm_hz", 50.0),
+                ("osc_clock_hz", 25_000_000.0),
 
-        # Axis mappings (input is -100..100)
-        self.declare_parameter("steering_deadband", 2.0)
-        self.declare_parameter("steering_cap", 50.0)
-        self.declare_parameter("throttle_deadband", 2.0)
-        self.declare_parameter("throttle_cap", 100.0)
+                ("steering_channel", 12),
+                ("steering_min_tick", 205),
+                ("steering_center_tick", 307),
+                ("steering_max_tick", 410),
+                ("invert_steering", False),
 
-        # Output channels
-        self.declare_parameter("steering_channel", 12)
-        self.declare_parameter("motor_forward_channel", 14)
-        self.declare_parameter("motor_backward_channel", 15)
+                ("motor_forward_channel", 14),
+                ("motor_backward_channel", 15),
+                ("throttle_min_tick", 819),
+                ("throttle_max_tick", 1638),
+                ("invert_throttle", False),
 
-        # Steering PWM range in PCA ticks (0..4095). Defaults match 1.0ms/1.5ms/2.0ms at 50Hz.
-        self.declare_parameter("steering_min", 205)
-        self.declare_parameter("steering_center", 307)
-        self.declare_parameter("steering_max", 410)
-        self.declare_parameter("invert_steering", False)
+                ("throttle_zero_epsilon", 0.02),
+                ("neutral_hold_ms", 100.0),
 
-        # Throttle PWM range in PCA ticks (0..4095).
-        # User requested min=20% (819) and max=40% (1638) of 4095.
-        self.declare_parameter("throttle_min", 819)
-        self.declare_parameter("throttle_max", 1638)
-        self.declare_parameter("invert_throttle", False)
+                ("min_tick_delta", 0),
+            ],
+        )}
 
-        # Safety / convenience
-        self.declare_parameter("direction_change_brake_ms", 50.0)
+        self.cmd_topic = str(P["cmd_topic"])
+        self.timeout_s = float(P["timeout_s"])
+        self.period_s = 1.0 / max(1.0, float(P["update_hz"]))
 
-        self._cmd_topic = str(self.get_parameter("cmd_topic").value)
-        self._timeout_s = float(self.get_parameter("timeout_s").value)
-        update_hz = float(self.get_parameter("update_hz").value)
-        self._period_s = 1.0 / max(1.0, update_hz)
+        self.i2c_bus = int(P["i2c_bus"])
+        self.i2c_addr = int(P["i2c_address"])
+        self.pwm_hz = float(P["pwm_hz"])
+        self.osc_hz = int(P["osc_clock_hz"])
 
-        self._steer_map = AxisMapping(
-            deadband=float(self.get_parameter("steering_deadband").value),
-            cap=float(self.get_parameter("steering_cap").value),
-        )
-        self._throttle_map = AxisMapping(
-            deadband=float(self.get_parameter("throttle_deadband").value),
-            cap=float(self.get_parameter("throttle_cap").value),
-        )
+        self.st_ch = int(P["steering_channel"])
+        self.st_min = int(P["steering_min_tick"])
+        self.st_mid = int(P["steering_center_tick"])
+        self.st_max = int(P["steering_max_tick"])
+        self.inv_st = bool(P["invert_steering"])
 
-        self._steering_pwm = SteeringPWM(
-            channel=int(self.get_parameter("steering_channel").value),
-            min_tick=int(self.get_parameter("steering_min").value),
-            center_tick=int(self.get_parameter("steering_center").value),
-            max_tick=int(self.get_parameter("steering_max").value),
-            invert=bool(self.get_parameter("invert_steering").value),
-        )
-        self._throttle_pwm = ThrottlePWM(
-            fwd_channel=int(self.get_parameter("motor_forward_channel").value),
-            rev_channel=int(self.get_parameter("motor_backward_channel").value),
-            min_tick=int(self.get_parameter("throttle_min").value),
-            max_tick=int(self.get_parameter("throttle_max").value),
-            invert=bool(self.get_parameter("invert_throttle").value),
-        )
+        self.fw_ch = int(P["motor_forward_channel"])
+        self.rv_ch = int(P["motor_backward_channel"])
+        self.th_min = int(P["throttle_min_tick"])
+        self.th_max = int(P["throttle_max_tick"])
+        self.inv_th = bool(P["invert_throttle"])
 
-        self._direction_change_brake_ms = float(self.get_parameter("direction_change_brake_ms").value)
+        self.eps = float(P["throttle_zero_epsilon"])
+        self.hold_ns = int(max(0.0, float(P["neutral_hold_ms"])) * 1e6)
 
+        self.min_tick_delta = int(P["min_tick_delta"])
+
+        if not (0 <= self.st_min <= self.st_mid <= self.st_max <= 4095):
+            raise ValueError("steering ticks invalid")
+        if not (0 <= self.th_min <= self.th_max <= 4095):
+            raise ValueError("throttle ticks invalid")
+        if len({self.st_ch, self.fw_ch, self.rv_ch}) != 3:
+            raise ValueError("channels must be distinct")
+
+        i2c = open_i2c(self.i2c_bus)
+        self.pca = PCA9685(i2c, address=self.i2c_addr, reference_clock_speed=self.osc_hz)
+        self.pca.frequency = self.pwm_hz
+
+        now_ns = self.get_clock().now().nanoseconds
+        self.last_cmd_ns = now_ns
+        self.target: Tuple[float, float] = (0.0, 0.0)
+
+        self.state = self.NORMAL
+        self.pre_sign = 0
+        self.hold_end_ns = now_ns
+        self.applied_thr = 0.0
+
+        self.last_written: Dict[int, int] = {}
+
+        self.create_subscription(Float32MultiArray, self.cmd_topic, self.on_cmd, 10)
+        self.create_timer(self.period_s, self.update)
+
+        self.write_outputs(0.0, 0.0)  # startup safe
+
+    def shutdown(self) -> None:
         try:
-            self._pca: Optional[PCA9685] = PCA9685(
-                bus=1,
-                address=0x40,
-                osc_clock_hz=float(self.get_parameter("osc_clock_hz").value),
-                pwm_hz=float(self.get_parameter("pwm_hz").value),
-            )
-            self.get_logger().info(
-                "PCA9685 ready on i2c-1 addr=0x40"
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Failed to init PCA9685 (HW-170). Check: I2C enabled, wiring OK, address/bus correct, and install SMBus support: sudo apt install python3-smbus i2c-tools"
-            ) from e
+            self.write_outputs(0.0, 0.0)
+        finally:
+            try:
+                self.pca.deinit()
+            except Exception:
+                pass
 
-        self._last_cmd_time = self.get_clock().now()
-        self._last_cmd: Tuple[float, float] = (0.0, 0.0)
-        self._last_throttle_sign: int = 0
-
-        self._sub = self.create_subscription(Float32MultiArray, self._cmd_topic, self._on_cmd, 10)
-        self._timer = self.create_timer(self._period_s, self._update_outputs)
-
-        # Ensure safe outputs on startup
-        self._write_outputs(steering_cmd=0.0, throttle_cmd=0.0, reason="startup")
-
-        self.get_logger().info(
-            f"Subscribed to {self._cmd_topic} as std_msgs/Float32MultiArray [steering, throttle] in [-100,100]"
-        )
-
-    def _on_shutdown(self) -> None:
-        self._write_outputs(steering_cmd=0.0, throttle_cmd=0.0, reason="shutdown")
-        if self._pca is not None:
-            self._pca.close()
-
-    def _on_cmd(self, msg: Float32MultiArray) -> None:
+    def on_cmd(self, msg: Float32MultiArray) -> None:
         if len(msg.data) < 2:
-            self.get_logger().warn("/ackermann/cmd needs 2 floats: [steering, throttle]")
             return
-        steering = float(msg.data[0])
-        throttle = float(msg.data[1])
-        self._last_cmd = (steering, throttle)
-        self._last_cmd_time = self.get_clock().now()
+        self.target = (n01(msg.data[0]), n01(msg.data[1]))
+        self.last_cmd_ns = self.get_clock().now().nanoseconds
 
-    def _update_outputs(self) -> None:
-        now = self.get_clock().now()
-        age = (now - self._last_cmd_time).nanoseconds * 1e-9
-
-        if age > self._timeout_s:
-            steering_cmd, throttle_cmd = 0.0, 0.0
-            reason = f"timeout ({age:.3f}s)"
+    def update(self) -> None:
+        now_ns = self.get_clock().now().nanoseconds
+        if (now_ns - self.last_cmd_ns) * 1e-9 > self.timeout_s:
+            steer_t, thr_t = 0.0, 0.0
+            self.state = self.NORMAL
+            self.pre_sign = 0
+            self.hold_end_ns = now_ns
+            self.applied_thr = 0.0
         else:
-            steering_cmd, throttle_cmd = self._last_cmd
-            reason = "cmd"
+            steer_t, thr_t = self.target
 
-        self._write_outputs(steering_cmd=steering_cmd, throttle_cmd=throttle_cmd, reason=reason)
+        if self.inv_st:
+            steer_t = -steer_t
+        if self.inv_th:
+            thr_t = -thr_t
 
-    def _write_outputs(self, *, steering_cmd: float, throttle_cmd: float, reason: str) -> None:
-        steering_cmd = max(-100.0, min(100.0, float(steering_cmd)))
-        throttle_cmd = max(-100.0, min(100.0, float(throttle_cmd)))
+        self.write_outputs(steer_t, self.throttle_hold(now_ns, thr_t))
 
-        steering_cmd = _apply_deadband(steering_cmd, self._steer_map.deadband)
-        throttle_cmd = _apply_deadband(throttle_cmd, self._throttle_map.deadband)
+    def throttle_hold(self, now_ns: int, target: float) -> float:
+        ts = sgn(target, self.eps)
+        as_ = sgn(self.applied_thr, self.eps)
 
-        if self._steering_pwm.invert:
-            steering_cmd *= -1.0
-        if self._throttle_pwm.invert:
-            throttle_cmd *= -1.0
+        if self.state == self.NORMAL:
+            if as_ and ts and ts != as_:
+                self.state = self.HOLD
+                self.pre_sign = as_
+                self.hold_end_ns = now_ns + self.hold_ns
+                self.applied_thr = 0.0
+                return 0.0
+            self.applied_thr = target
+            return target
 
-        # Steering mapping: centered PWM
-        steer_norm = _norm_with_cap(steering_cmd, self._steer_map.cap)
-        if steering_cmd >= 0.0:
-            steering_tick = int(
-                round(
-                    self._steering_pwm.center_tick
-                    + steer_norm * (self._steering_pwm.max_tick - self._steering_pwm.center_tick)
-                )
-            )
+        if ts == 0 or ts == self.pre_sign:
+            self.state = self.NORMAL
+            self.applied_thr = target
+            return target
+
+        if now_ns < self.hold_end_ns:
+            self.applied_thr = 0.0
+            return 0.0
+
+        self.state = self.NORMAL
+        self.applied_thr = target
+        return target
+
+    def steer_tick(self, steer: float) -> int:
+        s = n01(steer)
+        if s >= 0.0:
+            t = self.st_mid + s * (self.st_max - self.st_mid)
         else:
-            steering_tick = int(
-                round(
-                    self._steering_pwm.center_tick
-                    - steer_norm * (self._steering_pwm.center_tick - self._steering_pwm.min_tick)
-                )
-            )
-        steering_tick = max(self._steering_pwm.min_tick, min(self._steering_pwm.max_tick, steering_tick))
+            t = self.st_mid + s * (self.st_mid - self.st_min)
+        t = int(round(t))
+        return self.st_min if t < self.st_min else self.st_max if t > self.st_max else t
 
-        # Throttle mapping: split forward/back
-        if throttle_cmd == 0.0:
-            fwd_tick = 0
-            rev_tick = 0
-            throttle_sign = 0
-        else:
-            throttle_norm = _norm_with_cap(throttle_cmd, self._throttle_map.cap)
-            duty = int(round(self._throttle_pwm.min_tick + throttle_norm * (self._throttle_pwm.max_tick - self._throttle_pwm.min_tick)))
-            duty = max(0, min(4095, duty))
-            throttle_sign = 1 if throttle_cmd > 0.0 else -1
-            fwd_tick = duty if throttle_sign > 0 else 0
-            rev_tick = duty if throttle_sign < 0 else 0
+    def throttle_ticks(self, thr: float) -> Tuple[int, int]:
+        t = n01(thr)
+        s = sgn(t, self.eps)
+        if s == 0:
+            return 0, 0
+        duty = int(round(self.th_min + abs(t) * (self.th_max - self.th_min)))
+        duty = 0 if duty < 0 else 4095 if duty > 4095 else duty
+        return (duty, 0) if s > 0 else (0, duty)
 
-        # Optional brake when switching direction
-        if throttle_sign != 0 and self._last_throttle_sign != 0 and throttle_sign != self._last_throttle_sign:
-            self._set_channel(self._throttle_pwm.fwd_channel, 0)
-            self._set_channel(self._throttle_pwm.rev_channel, 0)
-            time.sleep(max(0.0, self._direction_change_brake_ms) / 1000.0)
+    def write_tick(self, ch: int, tick12: int) -> None:
+        tick12 = 0 if tick12 < 0 else 4095 if tick12 > 4095 else int(tick12)
+        prev = self.last_written.get(ch)
 
-        self._last_throttle_sign = throttle_sign
+        if prev is not None and tick12 == prev:
+            return
+        if (
+            self.min_tick_delta > 0 and prev is not None
+            and prev != 0 and tick12 != 0
+            and abs(tick12 - prev) < self.min_tick_delta
+        ):
+            return
 
-        self._set_channel(self._steering_pwm.channel, steering_tick)
-        self._set_channel(self._throttle_pwm.fwd_channel, fwd_tick)
-        self._set_channel(self._throttle_pwm.rev_channel, rev_tick)
+        self.pca.channels[ch].duty_cycle = u16_from_tick12(tick12)
+        self.last_written[ch] = tick12
 
-    def _set_channel(self, channel: int, duty: int) -> None:
-        if self._pca is None:
-            raise RuntimeError("PCA9685 not initialized")
+    def write_outputs(self, steer: float, thr: float) -> None:
+        st = self.steer_tick(steer)
+        fw, rv = self.throttle_ticks(thr)
+        if fw and rv:
+            fw = rv = 0
+
         try:
-            self._pca.set_duty(int(channel), int(duty))
+            self.write_tick(self.st_ch, st)
+            self.write_tick(self.fw_ch, fw)
+            self.write_tick(self.rv_ch, rv)
         except Exception as e:
-            self.get_logger().error(f"Failed to set PCA9685 channel {channel} duty={duty}: {e}")
+            self.get_logger().error(f"PWM write failed: {e}")
 
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = AckermannDriver()
+    n = ActuatorDriver()
     try:
-        rclpy.spin(node)
+        rclpy.spin(n)
     finally:
         try:
-            node._on_shutdown()
+            n.shutdown()
         except Exception:
             pass
-        node.destroy_node()
+        n.destroy_node()
         rclpy.shutdown()
