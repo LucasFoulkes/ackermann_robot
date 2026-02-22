@@ -5,6 +5,22 @@ This package exists to hold a single launch file that starts:
 - Static TF `base_link -> base_laser`
 - RF2O (`rf2o_laser_odometry_node`)
 
+## Movement only (Bluetooth + servos + motors)
+
+To drive the robot with a PS4 controller over Bluetooth—no LiDAR, no Nav2, no SLAM—run:
+
+```bash
+cd /home/luky/ros2_ws
+source install/setup.bash
+ros2 launch ackermann_robot teleop.launch.py
+```
+
+This starts:
+- **ackermann_driver** – subscribes to `/ackermann/cmd`, drives steering (servo) and motor via PCA9685 (I²C PWM).
+- **ps4_teleop** – connects to the DualShock 4 over Bluetooth, publishes `[steer, throttle]` on `/ackermann/cmd`.
+
+Left stick X → steering; right stick Y → throttle. Ensure the controller is paired and you have `python3-evdev` and `bluez` installed (see PS4 teleop section below).
+
 ## Run
 
 After building the workspace:

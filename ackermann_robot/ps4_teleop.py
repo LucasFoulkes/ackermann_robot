@@ -1,278 +1,146 @@
 #!/usr/bin/env python3
+import math
 import subprocess
-import time
-import sys
-import os
-import glob
-import select
 import threading
-from dataclasses import dataclass
+import time
+from pathlib import Path
 
 try:
     import evdev
-    from evdev import ecodes
+    from evdev import ecodes as e
 except ImportError:
-    sys.exit("Error: Please install evdev (pip install evdev)")
+    raise SystemExit("Error: Please install evdev (pip install evdev)")
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import Float32MultiArray
-
-
-@dataclass
-class Config:
-    mac: str = "00:10:80:26:6B:1A"
-    # Minimum deadzone in percent (even if kernel flat is 0)
-    min_deadzone_pct: int = 4
-    # Optional per-axis center overrides (set to int to force, else None)
-    lx_center_override: int | None = None
-    ly_center_override: int | None = None
-    rx_center_override: int | None = None
-    ry_center_override: int | None = None
-
-
-class DualShock4:
-    def __init__(self, config: Config):
-        self.cfg = config
-        self.device = None
-        self.axes = {
-            ecodes.ABS_X: 0,    # Left Stick Horizontal (Steering)
-            ecodes.ABS_Y: 0,    # Left Stick Vertical
-            ecodes.ABS_RX: 0,   # Right Stick Horizontal
-            ecodes.ABS_RY: 0,   # Right Stick Vertical (Standard Throttle)
-            ecodes.ABS_Z: 0,    # L2 Trigger (Some controllers use this)
-            ecodes.ABS_RZ: 0,   # R2 Trigger (Often the REAL throttle axis)
-            ecodes.ABS_HAT0X: 0, # D-Pad Horizontal
-            ecodes.ABS_HAT0Y: 0, # D-Pad Vertical
-        }
-        self._abs_cache = {}
-
-    def connect_bluetooth(self, retries=12) -> bool:
-        print(f"Connecting to {self.cfg.mac}...")
-        script = "\n".join(
-            [
-                "power on",
-                "agent on",
-                "default-agent",
-                "pairable on",
-                f"trust {self.cfg.mac}",
-                f"pair {self.cfg.mac}",
-                f"connect {self.cfg.mac}",
-                "quit",
-            ]
-        )
-
-        for i in range(1, retries + 1):
-            res = subprocess.run(["bluetoothctl"], input=script, text=True, capture_output=True).stdout
-            info = subprocess.run(
-                ["bluetoothctl", "info", self.cfg.mac], text=True, capture_output=True
-            ).stdout
-
-            if "Connection successful" in res or "Connected: yes" in info:
-                print("Connection successful")
-                time.sleep(2)
-                return True
-
-            print(f"Attempt {i}/{retries} failed. Put controller in pairing mode (Share+PS)...")
-            time.sleep(2)
-
-        return False
-
-    def find_device(self, retries=30):
-        print(f"Waiting for input device {self.cfg.mac}...")
-        for _ in range(retries):
-            for path in evdev.list_devices():
-                try:
-                    d = evdev.InputDevice(path)
-                    if self._is_gamepad(d):
-                        print(f"Found: {d.name} at {path}")
-                        self.device = d
-                        self._prime_abs_cache()
-                        return True
-                except (OSError, AttributeError):
-                    pass
-            time.sleep(1)
-        return False
-
-    def _is_gamepad(self, dev):
-        if any(x in dev.name for x in ("Touchpad", "Motion Sensors")):
-            return False
-        if not (dev.uniq and dev.uniq.upper() == self.cfg.mac.upper()):
-            return False
-        caps = dev.capabilities()
-        if ecodes.EV_ABS not in caps or ecodes.EV_KEY not in caps:
-            return False
-        abs_caps = dict(caps[ecodes.EV_ABS])
-        keys = caps[ecodes.EV_KEY]
-        # Basic check: has ABS_X and a face button
-        return (ecodes.ABS_X in abs_caps) and (ecodes.BTN_SOUTH in keys or ecodes.BTN_A in keys)
-
-    @property
-    def battery(self):
-        clean_mac = self.cfg.mac.replace(":", "").lower()
-        for path in glob.glob("/sys/class/power_supply/*"):
-            if clean_mac in path.lower() or self.cfg.mac.lower() in path.lower():
-                try:
-                    with open(os.path.join(path, "capacity"), "r") as f:
-                        return int(f.read().strip())
-                except (OSError, ValueError):
-                    pass
-        return None
-
-    def _prime_abs_cache(self):
-        """Cache absinfo for the axes and print them once. Also pre-fill axes with current values."""
-        axis_list = [
-            ecodes.ABS_X, ecodes.ABS_Y, 
-            ecodes.ABS_RX, ecodes.ABS_RY, 
-            ecodes.ABS_Z, ecodes.ABS_RZ, 
-            ecodes.ABS_HAT0X, ecodes.ABS_HAT0Y
-        ]
-        names = {
-            ecodes.ABS_X: "LX",
-            ecodes.ABS_Y: "LY",
-            ecodes.ABS_RX: "RX",
-            ecodes.ABS_RY: "RY",
-            ecodes.ABS_Z: "L2",
-            ecodes.ABS_RZ: "R2",
-            ecodes.ABS_HAT0X: "HX",
-            ecodes.ABS_HAT0Y: "HY",
-        }
-
-        print("\nAxis absinfo (authoritative per-axis range/deadzone):")
-        for code in axis_list:
-            try:
-                ai = self.device.absinfo(code)
-                self._abs_cache[code] = ai
-
-                # FIX: Initialize the current value from the device so we don't start at 0 (which is -100%)
-                self.axes[code] = ai.value
-
-                print(
-                    f"  {names[code]:>2} ({code:>3}) "
-                    f"min={ai.min:<4} max={ai.max:<4} val={ai.value:<4} flat={ai.flat:<4} fuzz={ai.fuzz:<4}"
-                )
-            except Exception as e:
-                self._abs_cache[code] = None
-                print(f"  {names[code]:>2} ({code:>3}) absinfo unavailable: {e}")
-
-        print("")  # newline
-
-    def _center_override_for(self, code):
-        return {
-            ecodes.ABS_X: self.cfg.lx_center_override,
-            ecodes.ABS_Y: self.cfg.ly_center_override,
-            ecodes.ABS_RX: self.cfg.rx_center_override,
-            ecodes.ABS_RY: self.cfg.ry_center_override,
-        }.get(code)
-
-    def _center_for(self, code, ai):
-        ov = self._center_override_for(code)
-        if ov is not None:
-            return int(ov)
-        return (ai.min + ai.max) // 2
-
-    def _deadzone_pct_for(self, ai):
-        half = max(1.0, (ai.max - ai.min) / 2.0)
-        dz = (ai.flat / half) * 100.0 if getattr(ai, "flat", 0) else 0.0
-        return max(float(self.cfg.min_deadzone_pct), dz)
-
-    def _scale_axis(self, code, invert=False):
-        """Scale an EV_ABS axis to -100..100 using per-axis min/max/flat."""
-        ai = self._abs_cache.get(code) or self.device.absinfo(code)
-        if ai is None:
-            return 0
-
-        val = self.axes.get(code, 0)
-        amin, amax = ai.min, ai.max
-        center = self._center_for(code, ai)
-
-        if val >= center:
-            denom = amax - center
-            pct = 0.0 if denom == 0 else (val - center) / denom * 100.0
-        else:
-            denom = center - amin
-            pct = 0.0 if denom == 0 else -((center - val) / denom * 100.0)
-
-        dz = self._deadzone_pct_for(ai)
-        if abs(pct) < dz:
-            pct = 0.0
-
-        pct = max(-100.0, min(100.0, pct))
-        if invert:
-            pct = -pct
-
-        return int(round(pct))
-
-    def monitor(self, callback=None):
-        print("Monitoring... (Ctrl+C to stop)")
-        last_batt = None
-
-        try:
-            while True:
-                batt = self.battery
-                if batt is not None and batt != last_batt:
-                    print(f"\nBattery Level: {batt}%")
-                    last_batt = batt
-
-                r, _, _ = select.select([self.device.fd], [], [], 1.0)
-                if r:
-                    for event in self.device.read():
-                        if event.type == ecodes.EV_ABS and event.code in self.axes:
-                            self.axes[event.code] = event.value
-
-                            # Many controllers report "up" as smaller raw values on Y axes.
-                            lx = self._scale_axis(ecodes.ABS_X, invert=True)
-                            ly = self._scale_axis(ecodes.ABS_Y, invert=True)
-                            rx = self._scale_axis(ecodes.ABS_RX, invert=False)
-                            # Reverted to ABS_RY for throttle per your original requirement
-                            ry = self._scale_axis(ecodes.ABS_RY, invert=True)
-
-                            if callback:
-                                callback(lx, ly, rx, ry)
-
-                            # Print debug info for all axes to see what is happening
-                            print(
-                                f"\rLX: {lx:>4}% | RY: {ry:>4}% | (Debug RZ: {self.axes.get(ecodes.ABS_RZ, 0):>3})",
-                                end="",
-                                flush=True,
-                            )
-        except KeyboardInterrupt:
-            print("\nExiting.")
-        except OSError:
-            print("\nDevice disconnected.")
 
 
 class PS4TeleopNode(Node):
     def __init__(self):
         super().__init__("ps4_teleop")
-        self.declare_parameter("cmd_topic", "/ackermann/cmd")
-        self._cmd_topic = self.get_parameter("cmd_topic").value
-        
-        self.pub = self.create_publisher(Float32MultiArray, self._cmd_topic, 10)
-        self.get_logger().info(f"Publishing to {self._cmd_topic}")
 
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
+        p = lambda name, default: self.declare_parameter(name, default).value
+        self.mac = str(p("mac_address", "00:10:80:26:6B:1A")).upper()
+        self.dz = float(p("min_deadzone_pct", 4.0)) / 100.0
 
-    def _publish_command(self, lx, ly, rx, ry):
-        # User request: Left Joystick X (lx) -> Steering
-        #               Right Joystick Y (ry) -> Motor
-        msg = Float32MultiArray()
-        msg.data = [float(lx)/100.0, float(ry)/100.0]
-        self.pub.publish(msg)
+        qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.pub = self.create_publisher(Float32MultiArray, str(p("cmd_topic", "/ackermann/cmd_effort")), qos)
+
+        # Tuples are implicitly thread-safe in Python (GIL atomic assignment)
+        self.cmd = (0.0, 0.0)
+        self.battery_path = None
+        self.last_batt = None
+
+        self.create_timer(1.0 / max(1.0, float(p("publish_hz", 50.0))), self._publish_cb)
+        self.create_timer(10.0, self._battery_cb)
+
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    # -- ROS Timers -----------------------------------------------------------
+
+    def _publish_cb(self):
+        self.pub.publish(Float32MultiArray(data=list(self.cmd)))
+
+    def _battery_cb(self):
+        if not self.battery_path:
+            return
+        try:
+            if (batt := int(self.battery_path.read_text().strip())) != self.last_batt:
+                self.get_logger().info(f"Controller Battery: {batt}%")
+                self.last_batt = batt
+        except (OSError, ValueError):
+            pass
+
+    # -- Initialization & Math ------------------------------------------------
+
+    def _ensure_bluetooth(self) -> bool:
+        def check():
+            return "Connected: yes" in subprocess.run(
+                ["bluetoothctl", "info", self.mac], capture_output=True, text=True
+            ).stdout
+
+        if check():
+            return True
+
+        self.get_logger().info(f"Connecting to {self.mac}...")
+        subprocess.run(
+            ["bluetoothctl"],
+            input=f"power on\ntrust {self.mac}\nconnect {self.mac}\nquit\n",
+            text=True, capture_output=True,
+        )
+        time.sleep(1.0)
+        return check()
+
+    def _find_device(self):
+        for path in evdev.list_devices():
+            try:
+                dev = evdev.InputDevice(path)
+                if (dev.uniq and dev.uniq.upper() == self.mac
+                        and e.ABS_X in dev.capabilities(absinfo=False).get(e.EV_ABS, [])):
+                    return dev
+            except OSError:
+                pass
+        return None
+
+    def _scale(self, val: float, ai) -> float:
+        """Rescale raw axis value to -1..1 with deadzone and smooth stretch."""
+        center = (ai.max + ai.min) / 2.0
+        rng = max(1.0, (ai.max - ai.min) / 2.0)
+
+        norm = (val - center) / rng
+        dz = max(self.dz, ai.flat / rng)
+
+        if abs(norm) < dz:
+            return 0.0
+
+        rescaled = (abs(norm) - dz) / (1.0 - dz)
+        return float(max(-1.0, min(1.0, math.copysign(rescaled, norm))))
+
+    # -- Hardware Threading ---------------------------------------------------
 
     def _worker(self):
-        if not os.access('/dev/input/event0', os.R_OK):
-            print("Warning: You may need 'sudo' to access input devices.")
+        targets = {e.ABS_X: 0, e.ABS_RY: 0}
 
-        ds4 = DualShock4(Config())
-        if ds4.connect_bluetooth() and ds4.find_device():
-            ds4.monitor(callback=self._publish_command)
-        else:
-            self.get_logger().error("Failed to connect or find input device.")
+        while rclpy.ok():
+            if not self._ensure_bluetooth() or not (dev := self._find_device()):
+                self.cmd = (0.0, 0.0)
+                time.sleep(3.0)
+                continue
 
-    def destroy_node(self):
-        super().destroy_node()
+            self.get_logger().info(f"Connected: {dev.name} - Ready to Drive!")
+
+            info = {code: dev.absinfo(code) for code in targets}
+            axes = {code: info[code].value for code in targets}
+
+            mac_cln = self.mac.replace(":", "").lower()
+            mac_lwr = self.mac.lower()
+            self.battery_path = next(
+                (p / "capacity" for p in Path("/sys/class/power_supply").iterdir()
+                 if mac_cln in p.name.lower() or mac_lwr in p.name.lower()),
+                None,
+            )
+
+            try:
+                dirty = False
+                for ev in dev.read_loop():
+                    if ev.type == e.EV_ABS and ev.code in axes:
+                        axes[ev.code] = ev.value
+                        dirty = True
+
+                    elif ev.type == e.EV_SYN and dirty:
+                        self.cmd = (
+                            -self._scale(axes[e.ABS_X], info[e.ABS_X]),
+                            -self._scale(axes[e.ABS_RY], info[e.ABS_RY]),
+                        )
+                        dirty = False
+
+            except OSError:
+                self.get_logger().error("Device disconnected. Reconnecting...")
+            finally:
+                self.cmd = (0.0, 0.0)
+                self.battery_path = None
 
 
 def main(args=None):
@@ -285,7 +153,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         if rclpy.ok():
-            rclpy.shutdown()
+            rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

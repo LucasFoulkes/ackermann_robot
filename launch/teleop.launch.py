@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Launch only what is needed to move: PCA9685 (servo + motors) and PS4 Bluetooth teleop."""
 
 import os
 
@@ -20,14 +21,14 @@ def generate_launch_description():
         parameters=[os.path.join(config_dir, "ackermann_driver.yaml")],
     )
 
-    cmd_vel_bridge_node = Node(
+    ps4_teleop_node = Node(
         package="ackermann_robot",
-        executable="cmd_vel_bridge",
-        name="cmd_vel_bridge",
+        executable="ps4_teleop",
+        name="ps4_teleop",
         output="screen",
     )
 
     return LaunchDescription([
         ackermann_driver_node,
-        cmd_vel_bridge_node,
+        ps4_teleop_node,
     ])

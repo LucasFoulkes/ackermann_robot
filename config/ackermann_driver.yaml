@@ -1,0 +1,26 @@
+actuator_driver:
+  ros__parameters:
+    cmd_topic: "/ackermann/cmd_effort"
+    timeout_s: 10.0
+    update_hz: 50.0
+
+    i2c_bus: 1
+    i2c_address: 64
+    pwm_hz: 50.0
+    osc_clock_hz: 25000000
+
+    steering_channel: 12
+    steering_min_tick: 205
+    steering_center_tick: 307
+    steering_max_tick: 410
+    invert_steering: false
+
+    motor_forward_channel: 14
+    motor_backward_channel: 15
+    throttle_min_tick: 819
+    throttle_max_tick: 1638
+    invert_throttle: false
+
+    throttle_zero_epsilon: 0.02
+    neutral_hold_ms: 100.0
+    min_tick_delta: 0
