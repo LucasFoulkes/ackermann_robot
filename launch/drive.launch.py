@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive to goal: live SLAM + Nav2 + motor control (main outdoor stack).
 
-  C1 /scan -> rf2o + IMU -> EKF -> /odom  (use_ekf:=false for raw rf2o only)
+  C1 /scan -> icp_odometry + IMU -> EKF -> /odom  (use_ekf:=false skips EKF)
   slam_toolbox -> /map + map->odom
   Nav2 -> cmd_vel_to_effort (deadband yaml) -> driver
 
@@ -26,6 +26,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -37,6 +39,7 @@ def generate_launch_description():
     use_ekf = LaunchConfiguration("use_ekf", default="true")
     use_imu = LaunchConfiguration("use_imu", default="true")
     use_floor_scan = LaunchConfiguration("use_floor_scan", default="true")
+    log_csv = LaunchConfiguration("log_csv", default="true")
 
     return LaunchDescription([
         DeclareLaunchArgument("serial_port", default_value=serial_port,
@@ -49,6 +52,15 @@ def generate_launch_description():
                               description="D435i IMU for EKF"),
         DeclareLaunchArgument("use_floor_scan", default_value=use_floor_scan,
                               description="D435i RANSAC -> /camera/scan in local costmap"),
+        DeclareLaunchArgument("log_csv", default_value=log_csv,
+                              description="CSV telemetry (one file per run in ~/ros2_ws/logs)"),
+        Node(
+            package="ackermann_robot",
+            executable="drive_logger",
+            name="drive_logger",
+            output="screen",
+            condition=IfCondition(log_csv),
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(nav_launch),
             launch_arguments={

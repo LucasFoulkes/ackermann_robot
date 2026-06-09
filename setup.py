@@ -37,6 +37,7 @@ setup(
         'console_scripts': [
             'ackermann_driver = ackermann_robot.ackermann_driver:main',
             'ps4_teleop = ackermann_robot.ps4_teleop:main',
+            'drive_logger = ackermann_robot.drive_logger:main',
             'cmd_vel_to_effort = ackermann_robot.cmd_vel_to_effort:main',
             'web_teleop = ackermann_robot.web_teleop:main',
             'depth_floor_scan = ackermann_robot.depth_floor_scan:main',
