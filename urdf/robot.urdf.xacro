@@ -1,0 +1,200 @@
+<?xml version="1.0"?>
+<!-- =====================================================================
+     ackermann_robot — robot description for RViz visualisation.
+
+     Geometry is from the robot measurement sheet (all values in cm there,
+     metres here). Primitive shapes only. The 4 wheels are pure VISUAL
+     geometry on base_link — not links, no joints (no steering/rolling
+     data yet). Only the real sensor transforms are joints.
+
+     FRAME CONVENTION
+       base_link is at the REAR AXLE, on the ground:
+         x = 0      -> rear axle      (+x = forward)
+         y = 0      -> robot centre   (+y = left)
+         z = 0      -> ground         (+z = up)
+       Sensor "Height" values from the sheet are heights above the ground,
+       so they are used directly as z in base_link.
+
+     The body box is drawn semi-transparent so the wheels and sensors
+     (which sit within its envelope) remain visible in RViz.
+
+     Process to URDF with:  xacro robot.urdf.xacro
+     ===================================================================== -->
+<robot name="ackermann_robot" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!-- Intel's official RealSense D435i description (ros-jazzy-realsense2-description).
+       Provides the sensor_d435i macro: real mesh + correct optical sub-frames. -->
+  <xacro:include filename="$(find realsense2_description)/urdf/_d435i.urdf.xacro"/>
+
+  <!-- == Body (measurement sheet) == -->
+  <xacro:property name="body_length"    value="0.385"/>
+  <xacro:property name="body_width"     value="0.300"/>
+  <xacro:property name="body_height"    value="0.165"/>
+  <!-- Ground clearance is NOT on the sheet — estimate, tune freely. -->
+  <xacro:property name="body_clearance" value="0.030"/>
+
+  <!-- == Longitudinal layout: x forward from base_link = rear axle == -->
+  <xacro:property name="rear_bumper_x"  value="-0.0538"/>
+  <xacro:property name="front_bumper_x" value="0.3313"/>
+  <xacro:property name="wheelbase"      value="0.2775"/>  <!-- rear axle (0) -> front axle -->
+
+  <!-- == Wheels (measurement sheet) == -->
+  <xacro:property name="wheel_radius"   value="0.060"/>   <!-- Ø 12 cm -->
+  <xacro:property name="wheel_width"    value="0.057"/>   <!-- 5.7 cm thick -->
+  <!-- sheet gives 19 cm INNER gap between wheels; centre-to-centre = gap + wheel_width -->
+  <xacro:property name="track"          value="0.247"/>   <!-- left<->right wheel centres (0.190 + 0.057) -->
+
+  <!-- == Sensors: forward of base_link, height above ground == -->
+  <!-- placed so the camera's rear face is 4.8 cm ahead of the lidar centre:
+       laser_x = camera_x(0.2975) - camera half-depth(0.0125) - 0.048 -->
+  <xacro:property name="laser_x"        value="0.237"/>
+  <!-- raised so the lidar body (centre +/- 20.65 mm) clears the camera
+       prism top (0.140 m): bottom = 0.165 - 0.0207 = 0.144 -->
+  <xacro:property name="laser_z"        value="0.165"/>
+  <xacro:property name="laser_yaw"      value="${pi}"/>   <!-- lidar mounted rotated 180° -->
+  <!-- 4 cm behind the front edge of the front wheels (wheelbase + wheel_radius) -->
+  <xacro:property name="camera_x"       value="${wheelbase + wheel_radius - 0.040}"/>
+  <xacro:property name="camera_y"       value="0.0"/>     <!-- sheet: centred -->
+  <!-- prism CENTRE; top of the 25 mm prism sits 14 cm above the floor:
+       camera_z = 0.140 - prism half-height(0.0125) -->
+  <xacro:property name="camera_z"       value="0.1275"/>
+  <xacro:property name="camera_yaw"     value="0.0"/>
+
+  <!-- == Derived == -->
+  <xacro:property name="body_center_x"  value="${(rear_bumper_x + front_bumper_x) / 2}"/>
+  <xacro:property name="body_center_z"  value="${body_clearance + body_height / 2}"/>
+
+  <!-- == Materials == -->
+  <material name="grey">  <color rgba="0.45 0.45 0.48 0.55"/></material>  <!-- translucent body -->
+  <material name="black"> <color rgba="0.10 0.10 0.10 1.0"/></material>
+  <material name="darkgrey"><color rgba="0.22 0.22 0.24 1.0"/></material>
+  <material name="orange"><color rgba="0.95 0.45 0.10 1.0"/></material>  <!-- opaque chassis -->
+  <material name="red">   <color rgba="0.80 0.15 0.15 1.0"/></material>
+  <material name="blue">  <color rgba="0.15 0.35 0.85 1.0"/></material>
+
+  <!-- == Wheel: DECORATIVE ONLY — a cylinder visual placed straight on
+       base_link. No links, no joints: we have no steering/rolling data, so
+       the wheels are drawn but never move (and no joint_state_publisher is
+       needed). == -->
+  <xacro:macro name="wheel_visual" params="x y">
+    <visual>
+      <!-- cylinder's own axis is Z; roll it 90° so it points along Y -->
+      <origin xyz="${x} ${y} ${wheel_radius}" rpy="${pi/2} 0 0"/>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+  </xacro:macro>
+
+  <!-- =================================================================
+       base_link — root frame, at the rear axle on the ground.
+       Holds the chassis box and the 4 decorative wheel visuals.
+
+       Chassis spans the wheels' footprint, extended 3.5 cm past the
+       rear wheels and 2.5 cm past the front wheels:
+         x : back  = -wheel_radius - 0.035
+             front =  wheelbase + wheel_radius + 0.025  -> length 0.4575
+         y : between the inner wheel faces (track - wheel_width) -> 0.190
+         z : wheel axle (wheel_radius) up to wheel top (2*wheel_radius)
+             -> height 0.060
+       ================================================================= -->
+  <xacro:property name="chassis_rear_ext"  value="0.035"/>
+  <xacro:property name="chassis_front_ext" value="0.025"/>
+  <xacro:property name="chassis_cx" value="${wheelbase/2 + (chassis_front_ext - chassis_rear_ext)/2}"/>
+  <xacro:property name="chassis_cz" value="${1.5*wheel_radius}"/>
+  <xacro:property name="chassis_lx" value="${wheelbase + 2*wheel_radius + chassis_rear_ext + chassis_front_ext}"/>
+  <xacro:property name="chassis_ly" value="${track - wheel_width}"/>
+  <xacro:property name="chassis_lz" value="${wheel_radius}"/>
+  <link name="base_link">
+    <visual>
+      <origin xyz="${chassis_cx} 0 ${chassis_cz}" rpy="0 0 0"/>
+      <geometry>
+        <box size="${chassis_lx} ${chassis_ly} ${chassis_lz}"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+
+    <!-- decorative wheels: front pair at the front axle, rear pair at base_link -->
+    <xacro:wheel_visual x="${wheelbase}" y="${ track/2}"/>
+    <xacro:wheel_visual x="${wheelbase}" y="${-track/2}"/>
+    <xacro:wheel_visual x="0"            y="${ track/2}"/>
+    <xacro:wheel_visual x="0"            y="${-track/2}"/>
+
+    <collision>
+      <origin xyz="${chassis_cx} 0 ${chassis_cz}" rpy="0 0 0"/>
+      <geometry>
+        <box size="${chassis_lx} ${chassis_ly} ${chassis_lz}"/>
+      </geometry>
+    </collision>
+    <!-- inertia for a 4 kg solid box of the chassis dimensions -->
+    <inertial>
+      <origin xyz="${chassis_cx} 0 ${chassis_cz}" rpy="0 0 0"/>
+      <mass value="4.0"/>
+      <inertia ixx="${4.0/12*(chassis_ly*chassis_ly + chassis_lz*chassis_lz)}"
+               ixy="0" ixz="0"
+               iyy="${4.0/12*(chassis_lx*chassis_lx + chassis_lz*chassis_lz)}"
+               iyz="0"
+               izz="${4.0/12*(chassis_lx*chassis_lx + chassis_ly*chassis_ly)}"/>
+    </inertial>
+  </link>
+
+  <!-- =================================================================
+       base_laser — RPLIDAR C1, +14.75 cm forward, 14 cm up, rotated 180°.
+       Drawn with a real STL mesh (GrabCAD, modelled in mm -> scale 0.001).
+       The mesh is authored with its height along Y and its origin at a
+       corner, so the visual <origin> below:
+         rpy roll +90deg  : stands the mesh upright (mesh Y -> world Z)
+         rpy yaw  -90deg  : rotates it 90 deg clockwise (viewed from above)
+         xyz              : puts base_laser at the centre of the ROUND
+                            lidar body (connector stub excluded)
+       ================================================================= -->
+  <link name="base_laser">
+    <visual>
+      <origin xyz="0.037 0.0278 -0.02065" rpy="${pi/2} 0 ${-pi/2}"/>
+      <geometry>
+        <mesh filename="package://ackermann_robot/meshes/rplidar_c1.stl"
+              scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="darkgrey"/>
+    </visual>
+    <!-- small inertia so Gazebo accepts the link (no collision: elevated) -->
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/>
+    </inertial>
+  </link>
+  <joint name="base_laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="base_laser"/>
+    <origin xyz="${laser_x} 0 ${laser_z}" rpy="0 0 ${laser_yaw}"/>
+  </joint>
+
+  <!-- =================================================================
+       RealSense D435i — Intel's official model via the sensor_d435i macro.
+       Parented to base_link (NOT base_laser) so the camera pose does not
+       inherit the laser's mounting rotation.
+
+       The macro's <origin> places the camera's bottom_screw_frame — the
+       tripod-screw mount on the underside, which lies ON the case centre-
+       line. So camera_x / camera_y / camera_z here denote the GEOMETRIC
+       CENTRE of the camera prism (the 25.05 x 90 x 25 mm box that
+       contains the D435i — realsense's own collision box):
+         y : screw is on the prism centreline -> no y offset (stays centred)
+         x : prism centre is 10.6 mm forward of the screw frame
+         z : prism centre is 12.5 mm above the screw frame
+
+       The macro builds d435i_link plus the optical sub-frames
+       (d435i_color_optical_frame, d435i_depth_optical_frame, ...).
+       ================================================================= -->
+  <xacro:property name="d435i_mount_dx" value="0.0106"/>
+  <xacro:property name="d435i_mount_dz" value="0.0125"/>
+  <!-- use_nominal_extrinsics=true bakes the optical sub-frames into the URDF
+       (datasheet values). Needed for RViz when the camera driver isn't
+       running to publish them itself. -->
+  <xacro:sensor_d435i parent="base_link" name="d435i" use_nominal_extrinsics="true">
+    <origin xyz="${camera_x - d435i_mount_dx} ${camera_y} ${camera_z - d435i_mount_dz}"
+            rpy="0 0 ${camera_yaw}"/>
+  </xacro:sensor_d435i>
+
+</robot>

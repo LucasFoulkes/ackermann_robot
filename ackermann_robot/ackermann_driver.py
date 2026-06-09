@@ -19,7 +19,7 @@ def open_i2c(bus: int):
 
 
 def clamp(x) -> float:
-    """Fast filter for NaNs, type-safety, and out-of-bounds inputs."""
+    """Filter NaNs, bad types, and out-of-bounds inputs to a safe -1..1."""
     try:
         x = float(x)
         return max(-1.0, min(1.0, x)) if math.isfinite(x) else 0.0
@@ -28,59 +28,54 @@ def clamp(x) -> float:
 
 
 class ActuatorDriver(Node):
-    MAX_PWM = 4095
-
     def __init__(self):
         super().__init__("actuator_driver")
 
-        p = lambda n, d: self.declare_parameter(n, d).value
+        self.timeout_ns = int(self.param("timeout_s", 0.5) * 1e9)
+        self.reverse_delay_ns = int(max(0.0, self.param("neutral_hold_ms", 100.0)) * 1e6)
 
-        # Timings pre-computed to nanoseconds for zero-cost loop comparisons
-        self.timeout_ns = int(p("timeout_s", 10.0) * 1e9)
-        self.hold_ns = int(max(0.0, p("neutral_hold_ms", 100.0)) * 1e6)
-        self.eps = float(p("throttle_zero_epsilon", 0.02))
-        self.min_delta = int(p("min_tick_delta", 0))
-
-        # Hardware Setup
+        # Hardware
         self.pca = PCA9685(
-            open_i2c(p("i2c_bus", 1)), address=p("i2c_address", 64),
-            reference_clock_speed=p("osc_clock_hz", 25_000_000),
+            open_i2c(self.param("i2c_bus", 1)),
+            address=self.param("i2c_address", 64),
+            reference_clock_speed=self.param("osc_clock_hz", 25_000_000),
         )
-        self.pca.frequency = p("pwm_hz", 50.0)
+        self.pca.frequency = self.param("pwm_hz", 50.0)
 
-        # Steering servo
-        self.st_ch = p("steering_channel", 12)
-        self.st_cal = (p("steering_min_tick", 205), p("steering_center_tick", 307), p("steering_max_tick", 410))
-        self.st_dir = -1.0 if p("invert_steering", False) else 1.0
+        # Steering servo: linear map -1..1 -> center +/- half
+        self.steering_ch = self.param("steering_channel", 15)
+        self.steering_inverted = bool(self.param("steering_inverted", False))
+        steering_min = self.param("steering_min_tick", 205)
+        steering_max = self.param("steering_max_tick", 410)
+        self.steering_center = self.param("steering_center_tick", 307)
+        self.steering_half_range = min(
+            self.steering_center - steering_min,
+            steering_max - self.steering_center,
+        )
 
-        # Motor
-        self.fw_ch = p("motor_forward_channel", 14)
-        self.rv_ch = p("motor_backward_channel", 15)
-        self.th_cal = (p("throttle_min_tick", 819), p("throttle_max_tick", 1638))
-        self.th_dir = -1.0 if p("invert_throttle", False) else 1.0
+        # Drive motor: dual-channel H-bridge (forward / backward)
+        self.forward_ch = self.param("motor_forward_channel", 1)
+        self.reverse_ch = self.param("motor_backward_channel", 2)
+        self.throttle_max = self.param("throttle_max_tick", 1638)
 
-        # Validate calibration
-        s_min, s_mid, s_max = self.st_cal
-        t_min, t_max = self.th_cal
-        if not (0 <= s_min <= s_mid <= s_max <= self.MAX_PWM):
-            raise ValueError("steering ticks out of range")
-        if not (0 <= t_min <= t_max <= self.MAX_PWM):
-            raise ValueError("throttle ticks out of range")
-        if len({self.st_ch, self.fw_ch, self.rv_ch}) != 3:
-            raise ValueError("PCA9685 channels must be distinct")
-
-        # State
-        now = self.get_clock().now().nanoseconds
-        self.last_active_ns = {1: now - self.hold_ns, -1: now - self.hold_ns}
-        self.last_cmd_ns = now
         self.cmd = (0.0, 0.0)
-        self._prev = {}
+        now = self.get_clock().now().nanoseconds
+        self.last_cmd_ns = now
+        self.last_forward_ns = now - self.reverse_delay_ns
+        self.last_reverse_ns = now - self.reverse_delay_ns
 
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1)
-        self.create_subscription(Float32MultiArray, str(p("cmd_topic", "/ackermann/cmd_effort")), self._on_cmd, qos)
-        self.create_timer(1.0 / max(1.0, float(p("update_hz", 50.0))), self._tick)
+        self.create_subscription(
+            Float32MultiArray,
+            str(self.param("cmd_topic", "/ackermann/cmd_effort")),
+            self._on_cmd,
+            qos,
+        )
+        update_hz = max(1.0, float(self.param("update_hz", 50.0)))
+        self.create_timer(1.0 / update_hz, self._tick)
 
-    # -- ROS Callbacks --------------------------------------------------------
+    def param(self, name: str, default):
+        return self.declare_parameter(name, default).value
 
     def _on_cmd(self, msg: Float32MultiArray):
         if len(msg.data) >= 2:
@@ -90,54 +85,40 @@ class ActuatorDriver(Node):
     def _tick(self):
         now = self.get_clock().now().nanoseconds
 
-        st, th = self.cmd if (now - self.last_cmd_ns) <= self.timeout_ns else (0.0, 0.0)
+        # Watchdog: zero everything if commands have gone stale.
+        if now - self.last_cmd_ns > self.timeout_ns:
+            steering, throttle = 0.0, 0.0
+        else:
+            steering, throttle = self.cmd
+        if self.steering_inverted:
+            steering = -steering
 
-        st *= self.st_dir
-        th *= self.th_dir
+        steering_tick = round(self.steering_center + steering * self.steering_half_range)
 
-        # Direction vector: 1 (FW), -1 (RV), 0 (Neutral)
-        ts = 1 if th > self.eps else -1 if th < -self.eps else 0
-
-        if ts != 0:
-            if now < self.last_active_ns[-ts] + self.hold_ns:
-                th, ts = 0.0, 0
-            else:
-                self.last_active_ns[ts] = now
-
-        # Steering interpolation (asymmetric around center, clamped to calibration range)
-        s_min, s_mid, s_max = self.st_cal
-        st_tick = max(s_min, min(s_max, int(round(
-            s_mid + st * (s_max - s_mid if st >= 0 else s_mid - s_min)
-        ))))
-
-        # Throttle interpolation
-        t_min, t_max = self.th_cal
-        duty = int(round(t_min + abs(th) * (t_max - t_min))) if ts != 0 else 0
-        fw, rv = (duty, 0) if ts == 1 else (0, duty) if ts == -1 else (0, 0)
+        # Motor: block a direction flip until the opposite side has idled reverse_delay_ns.
+        forward = reverse = 0
+        if throttle > 0.0 and now >= self.last_reverse_ns + self.reverse_delay_ns:
+            self.last_forward_ns = now
+            forward = round(throttle * self.throttle_max)
+        elif throttle < 0.0 and now >= self.last_forward_ns + self.reverse_delay_ns:
+            self.last_reverse_ns = now
+            reverse = round(-throttle * self.throttle_max)
 
         try:
-            self._set_channel(self.st_ch, st_tick)
-            self._set_channel(self.fw_ch, fw)
-            self._set_channel(self.rv_ch, rv)
+            self._set(self.steering_ch, steering_tick)
+            self._set(self.forward_ch, forward)
+            self._set(self.reverse_ch, reverse)
         except OSError as e:
-            self.get_logger().error(f"I2C Write Failed: {e}", throttle_duration_sec=1.0)
+            self.get_logger().error(f"I2C write failed: {e}", throttle_duration_sec=1.0)
 
-    # -- Hardware Output ------------------------------------------------------
-
-    def _set_channel(self, ch: int, tick: int):
-        tick = max(0, min(self.MAX_PWM, tick))
-        prev = self._prev.get(ch, -1)
-
-        if prev == tick or (self.min_delta and prev > 0 and tick > 0 and abs(tick - prev) < self.min_delta):
-            return
-
-        self.pca.channels[ch].duty_cycle = 0xFFFF if tick == self.MAX_PWM else (tick << 4) if tick else 0
-        self._prev[ch] = tick
+    def _set(self, ch: int, tick):
+        tick = max(0, min(4095, int(tick)))
+        self.pca.channels[ch].duty_cycle = tick << 4
 
     def destroy_node(self):
         try:
-            for ch in (self.st_ch, self.fw_ch, self.rv_ch):
-                self._set_channel(ch, 0)
+            for ch in (self.steering_ch, self.forward_ch, self.reverse_ch):
+                self._set(ch, 0)
             self.pca.deinit()
         except Exception:
             pass

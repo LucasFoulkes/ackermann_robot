@@ -1,0 +1,25 @@
+cmd_vel_to_effort:
+  ros__parameters:
+    # --- Geometry (matches urdf/robot.urdf.xacro measurement sheet) ---
+    wheelbase: 0.2775          # m, rear axle -> front axle
+    # Full steer effort (+/-1.0) = physical full lock = max usable curvature ~1.2 1/m.
+    # delta = atan(kappa * L) = atan(1.2 * 0.2775) = 0.3218 rad (18.4 deg).
+    # This is the HARD limit (full lock); planner stays inside it (see nav2_params
+    # minimum_turning_radius) so the controller keeps tracking margin.
+    max_steer_angle: 0.321751  # rad (18.4 deg = curvature 1.2 1/m at full lock)
+
+    # cmd_vel linear.x at this speed -> logical throttle 1.0 (then deadband -> raw PWM)
+    # Starting value from field log (~0.86 m/s scale); re-tune with |linear.x| > 0.05 test
+    max_speed: 0.85
+
+    apply_deadband: true
+    # Raw /ackermann/cmd_effort deadband (PlotJuggler startup test — starting values)
+    throttle_deadband_fwd: 0.45   # forward: below this, motion weak/unreliable
+    throttle_deadband_rev: 0.55   # reverse
+    steer_deadband_pos: 0.55      # data[0] positive (right)
+    steer_deadband_neg: 0.60      # data[0] negative (left)
+
+    closed_loop: false
+    control_hz: 50.0
+    cmd_timeout_s: 0.5
+    v_epsilon: 0.02

@@ -23,6 +23,7 @@ class PS4TeleopNode(Node):
 
         p = lambda name, default: self.declare_parameter(name, default).value
         self.mac = str(p("mac_address", "00:10:80:26:6B:1A")).upper()
+        self.auto_bt = bool(p("bluetooth_auto_connect", True))
         self.dz = float(p("min_deadzone_pct", 4.0)) / 100.0
 
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -104,7 +105,11 @@ class PS4TeleopNode(Node):
         targets = {e.ABS_X: 0, e.ABS_RY: 0}
 
         while rclpy.ok():
-            if not self._ensure_bluetooth() or not (dev := self._find_device()):
+            if self.auto_bt and not self._ensure_bluetooth():
+                self.cmd = (0.0, 0.0)
+                time.sleep(3.0)
+                continue
+            if not (dev := self._find_device()):
                 self.cmd = (0.0, 0.0)
                 time.sleep(3.0)
                 continue

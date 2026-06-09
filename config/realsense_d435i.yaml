@@ -1,0 +1,22 @@
+# RealSense D435i parameter overrides — merged by rs_launch.py via its
+# `config_file` argument (see sensors.launch.py).
+#
+# WHY THIS FILE EXISTS
+#   On this Raspberry Pi (ARM), realsense2_camera names the point-cloud
+#   processing filter "pointcloud__neon_" — after the ARM NEON SIMD set.
+#   The normal `pointcloud.enable` launch argument therefore does NOT match
+#   the node's actual parameter and is silently ignored: no point cloud is
+#   published, so /scan_camera stays empty.
+#   Ref: https://github.com/IntelRealSense/realsense-ros/issues/3397
+#
+#   The point cloud must be enabled with the suffixed name below.
+#
+# PORTABILITY
+#   The "__neon_" suffix is ARM/NEON-specific. On an x86 host the filter is
+#   named differently (e.g. "pointcloud" or "pointcloud__sse4_2_") and this
+#   key would have to change. Check with:
+#       ros2 param list /d435i/d435i | grep pointcloud
+#
+# rs_launch.py loads this file as a flat dict of parameter overrides, so do
+# NOT wrap it in the usual `<node>: ros__parameters:` structure.
+pointcloud__neon_.enable: true

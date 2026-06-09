@@ -1,0 +1,53 @@
+<!-- Ackermann-safe NavigateToPose tree: clear/wait/back up, but never spin in place. -->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="12" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <!-- Pause before plan so map->odom can catch up after prior goal / map resize. -->
+        <Wait wait_duration="3.0"/>
+        <RateController hz="0.5">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <!-- NO_VALID_PATH on a static map won't clear with global-only; local may
+                 hold phantom obstacles. Fail fast -> outer RoundRobin (drive/backup). -->
+            <Sequence name="PlannerRecovery">
+              <ClearEntireCostmap name="ClearLocalCostmap-Planner" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Planner" service_name="global_costmap/clear_entirely_global_costmap"/>
+              <Wait wait_duration="1.0"/>
+            </Sequence>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="2" name="FollowPath">
+          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <Sequence>
+            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </Sequence>
+        </RecoveryNode>
+      </PipelineSequence>
+      <!-- Run recovery on ANY nav failure (incl. planner START_OCCUPIED), not just
+           the costmap-clear-helps cases. The long forward footprint (base_link at the
+           rear axle) makes the start "occupied" when parked ~0.35-0.45 m from a wall,
+           even though the robot is clear. Clearing a static map can't fix that -> we
+           must physically reverse out, then replan. -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <!-- 1) Instant + harmless: clears live local obstacles for NO_VALID_PATH. -->
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <!-- 2) Drive forward along corridor — best escape when parallel to a side wall
+               with open space ahead (BackUp wedges / hits side inflation). -->
+          <DriveOnHeading dist_to_travel="0.40" speed="0.14" time_allowance="15"/>
+          <!-- 3) Reverse if forward blocked. -->
+          <BackUp backup_dist="0.35" backup_speed="0.14" error_code_id="{backup_error_code}"/>
+          <Wait wait_duration="3.0"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

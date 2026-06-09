@@ -1,361 +1,211 @@
-# Copyright (c) 2018 Intel Corporation
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#!/usr/bin/env python3
+"""Nav2 + live SLAM + Ackermann control (headless on the Pi).
 
+Default: loop closure + IMU; SLAM on /scan_slam (8 Hz). Local costmap + rf2o use /scan.
+use_floor_scan:=true (default): D435i RANSAC -> /camera/scan in local costmap.
+
+Diagnostics: [system_stats], [tf_health] in this terminal.
+RViz: nav2.rviz, Fixed Frame map, Nav2 Goal tool.
+"""
 import os
 
 from ament_index_python.packages import get_package_share_directory
-
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, SetEnvironmentVariable
-from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch_ros.actions import LoadComposableNodes, SetParameter
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.descriptions import ComposableNode, ParameterFile
-from nav2_common.launch import RewrittenYaml
+
+
+def _launch_setup(context, *args, **kwargs):
+    pkg = get_package_share_directory("ackermann_robot")
+    launch_dir = os.path.join(pkg, "launch")
+    nav2_params = os.path.join(pkg, "config", "nav2_params.yaml")
+    nav2_bt_xml = os.path.join(pkg, "config", "ackermann_nav_to_pose.xml")
+    nav2_through_poses_bt_xml = os.path.join(
+        pkg, "config", "ackermann_nav_through_poses.xml")
+    effort_yaml = os.path.join(pkg, "config", "cmd_vel_to_effort.yaml")
+    driver_yaml = os.path.join(pkg, "config", "ackermann_driver.yaml")
+    floor_scan_yaml = os.path.join(pkg, "config", "depth_floor_scan.yaml")
+    stuck_yaml = os.path.join(pkg, "config", "stuck_monitor.yaml")
+
+    use_ekf = LaunchConfiguration("use_ekf").perform(context) == "true"
+    use_imu = LaunchConfiguration("use_imu").perform(context) == "true"
+    use_floor_scan = LaunchConfiguration("use_floor_scan").perform(context) == "true"
+    depth_on = "true" if use_floor_scan else "false"
+
+    serial_port = LaunchConfiguration("serial_port")
+    closed_loop = LaunchConfiguration("closed_loop")
+    log_stats = LaunchConfiguration("log_system_stats").perform(context) == "true"
+    log_tf = LaunchConfiguration("log_tf_health").perform(context) == "true"
+    log_twist = LaunchConfiguration("log_twist").perform(context) == "true"
+    log_stuck = LaunchConfiguration("log_stuck").perform(context) == "true"
+
+    def include(name, launch_arguments=None, condition=None):
+        return IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(launch_dir, name)),
+            launch_arguments=launch_arguments or [],
+            condition=condition,
+        )
+
+    actions = []
+    slam_params = os.path.join(pkg, "config", "slam_toolbox_online_async.yaml")
+    slam_hz = 8.0
+    # SLAM-only throttle; rf2o + local costmap keep full /scan.
+    actions.append(Node(
+        package="ackermann_robot",
+        executable="scan_throttle",
+        name="scan_throttle",
+        output="screen",
+        parameters=[{"hz": slam_hz, "in_topic": "/scan", "out_topic": "/scan_slam"}],
+    ))
+    if log_stats:
+        actions.append(Node(
+            package="ackermann_robot",
+            executable="system_stats",
+            name="system_stats",
+            output="screen",
+            parameters=[{"period_s": 5.0}],
+        ))
+    if log_tf:
+        actions.append(Node(
+            package="ackermann_robot",
+            executable="tf_health",
+            name="tf_health",
+            output="screen",
+            parameters=[{"period_s": 1.0, "ready_max_age_s": 0.5}],
+        ))
+    if log_twist:
+        actions.append(Node(
+            package="ackermann_robot",
+            executable="twist_logger",
+            name="twist_logger",
+            output="screen",
+            parameters=[{"rate_hz": 20.0, "out_dir": "~/ros2_ws/logs"}],
+        ))
+    if log_stuck:
+        actions.append(Node(
+            package="ackermann_robot",
+            executable="stuck_monitor",
+            name="stuck_monitor",
+            output="screen",
+            parameters=[stuck_yaml],
+        ))
+
+    actions.extend([
+        include("robot_state_publisher.launch.py"),
+        include("c1.launch.py", [("serial_port", serial_port)]),
+    ])
+    if use_ekf:
+        actions.append(include(
+            "ekf_odom.launch.py",
+            [
+                ("use_imu", "true" if use_imu else "false"),
+                ("enable_depth", depth_on),
+                ("enable_color", depth_on),
+                ("enable_pointcloud", depth_on),
+            ],
+        ))
+    else:
+        actions.append(include("rf2o.launch.py"))
+    # D435i depth for floor scan when EKF runs without IMU.
+    if use_floor_scan and not use_imu:
+        actions.append(include("d435i.launch.py", [
+            ("enable_depth", "true"),
+            ("enable_color", "true"),
+            ("enable_pointcloud", "true"),
+        ]))
+    if use_floor_scan:
+        actions.append(Node(
+            package="ackermann_robot",
+            executable="depth_floor_scan",
+            name="depth_floor_scan",
+            output="screen",
+            parameters=[floor_scan_yaml],
+            respawn=True,
+            respawn_delay=2.0,
+        ))
+    actions.append(include("slam.launch.py", [("slam_params_file", slam_params)]))
+    actions.extend([
+        Node(
+            package="ackermann_robot",
+            executable="cmd_vel_to_effort",
+            name="cmd_vel_to_effort",
+            output="screen",
+            parameters=[effort_yaml, {"closed_loop": closed_loop}],
+        ),
+        Node(
+            package="ackermann_robot",
+            executable="ackermann_driver",
+            name="actuator_driver",
+            output="screen",
+            parameters=[driver_yaml],
+        ),
+        Node(
+            package="nav2_controller",
+            executable="controller_server",
+            name="controller_server",
+            output="screen",
+            parameters=[nav2_params],
+            remappings=[("cmd_vel", "/cmd_vel_nav")],
+        ),
+        Node(
+            package="nav2_planner",
+            executable="planner_server",
+            name="planner_server",
+            output="screen",
+            parameters=[nav2_params],
+        ),
+        Node(
+            package="nav2_behaviors",
+            executable="behavior_server",
+            name="behavior_server",
+            output="screen",
+            parameters=[nav2_params],
+            remappings=[("cmd_vel", "/cmd_vel_nav")],
+        ),
+        Node(
+            package="nav2_bt_navigator",
+            executable="bt_navigator",
+            name="bt_navigator",
+            output="screen",
+            parameters=[nav2_params, {
+                "default_nav_to_pose_bt_xml": nav2_bt_xml,
+                "default_nav_through_poses_bt_xml": nav2_through_poses_bt_xml,
+            }],
+        ),
+        Node(
+            package="nav2_lifecycle_manager",
+            executable="lifecycle_manager",
+            name="lifecycle_manager_navigation",
+            output="screen",
+            parameters=[nav2_params],
+        ),
+    ])
+    return actions
 
 
 def generate_launch_description():
-    # Get the launch directory
-    bringup_dir = get_package_share_directory('nav2_bringup')
-    ackermann_dir = get_package_share_directory('ackermann_robot')
+    serial_port = LaunchConfiguration("serial_port", default="/dev/ttyUSB0")
+    closed_loop = LaunchConfiguration("closed_loop", default="true")
+    use_ekf = LaunchConfiguration("use_ekf", default="true")
+    use_imu = LaunchConfiguration("use_imu", default="true")
 
-    namespace = LaunchConfiguration('namespace')
-    use_sim_time = LaunchConfiguration('use_sim_time')
-    autostart = LaunchConfiguration('autostart')
-    params_file = LaunchConfiguration('params_file')
-    use_composition = LaunchConfiguration('use_composition')
-    container_name = LaunchConfiguration('container_name')
-    container_name_full = (namespace, '/', container_name)
-    use_respawn = LaunchConfiguration('use_respawn')
-    log_level = LaunchConfiguration('log_level')
-
-    lifecycle_nodes = [
-        'controller_server',
-        'smoother_server',
-        'planner_server',
-        'route_server',
-        'behavior_server',
-        'velocity_smoother',
-        'collision_monitor',
-        'bt_navigator',
-        'waypoint_follower',
-        # 'docking_server', # Removed to prevent bringup failure
-    ]
-
-    # Map fully qualified names to relative ones so the node's namespace can be prepended.
-    # In case of the transforms (tf), currently, there doesn't seem to be a better alternative
-    # https://github.com/ros/geometry2/issues/32
-    # https://github.com/ros/robot_state_publisher/pull/30
-    # TODO(orduno) Substitute with `PushNodeRemapping`
-    #              https://github.com/ros2/launch_ros/issues/56
-    remappings = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
-
-    # Create our own temporary YAML files that include substitutions
-    param_substitutions = {'autostart': autostart}
-
-    configured_params = ParameterFile(
-        RewrittenYaml(
-            source_file=params_file,
-            root_key=namespace,
-            param_rewrites=param_substitutions,
-            convert_types=True,
+    return LaunchDescription([
+        DeclareLaunchArgument("serial_port", default_value=serial_port),
+        DeclareLaunchArgument("closed_loop", default_value=closed_loop),
+        DeclareLaunchArgument("use_ekf", default_value=use_ekf),
+        DeclareLaunchArgument("use_imu", default_value=use_imu,
+                              description="D435i IMU for EKF"),
+        DeclareLaunchArgument(
+            "use_floor_scan", default_value="true",
+            description="D435i depth RANSAC -> /camera/scan for local costmap",
         ),
-        allow_substs=True,
-    )
-
-    stdout_linebuf_envvar = SetEnvironmentVariable(
-        'RCUTILS_LOGGING_BUFFERED_STREAM', '1'
-    )
-
-    declare_namespace_cmd = DeclareLaunchArgument(
-        'namespace', default_value='', description='Top-level namespace'
-    )
-
-    declare_use_sim_time_cmd = DeclareLaunchArgument(
-        'use_sim_time',
-        default_value='false',
-        description='Use simulation (Gazebo) clock if true',
-    )
-
-    declare_params_file_cmd = DeclareLaunchArgument(
-        'params_file',
-        default_value=os.path.join(ackermann_dir, 'config', 'nav2_params.yaml'),
-        description='Full path to the ROS2 parameters file to use for all launched nodes',
-    )
-
-    declare_autostart_cmd = DeclareLaunchArgument(
-        'autostart',
-        default_value='true',
-        description='Automatically startup the nav2 stack',
-    )
-
-    declare_use_composition_cmd = DeclareLaunchArgument(
-        'use_composition',
-        default_value='False',
-        description='Use composed bringup if True',
-    )
-
-    declare_container_name_cmd = DeclareLaunchArgument(
-        'container_name',
-        default_value='nav2_container',
-        description='the name of conatiner that nodes will load in if use composition',
-    )
-
-    declare_use_respawn_cmd = DeclareLaunchArgument(
-        'use_respawn',
-        default_value='False',
-        description='Whether to respawn if a node crashes. Applied when composition is disabled.',
-    )
-
-    declare_log_level_cmd = DeclareLaunchArgument(
-        'log_level', default_value='info', description='log level'
-    )
-
-    load_nodes = GroupAction(
-        condition=IfCondition(PythonExpression(['not ', use_composition])),
-        actions=[
-            SetParameter('use_sim_time', use_sim_time),
-            Node(
-                package='nav2_controller',
-                executable='controller_server',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings + [('cmd_vel', 'cmd_vel_nav')],
-            ),
-            Node(
-                package='nav2_smoother',
-                executable='smoother_server',
-                name='smoother_server',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings,
-            ),
-            Node(
-                package='nav2_planner',
-                executable='planner_server',
-                name='planner_server',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings,
-            ),
-            Node(
-                package='nav2_route',
-                executable='route_server',
-                name='route_server',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings,
-            ),
-            Node(
-                package='nav2_behaviors',
-                executable='behavior_server',
-                name='behavior_server',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings + [('cmd_vel', 'cmd_vel_nav')],
-            ),
-            Node(
-                package='nav2_bt_navigator',
-                executable='bt_navigator',
-                name='bt_navigator',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings,
-            ),
-            Node(
-                package='nav2_waypoint_follower',
-                executable='waypoint_follower',
-                name='waypoint_follower',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings,
-            ),
-            Node(
-                package='nav2_velocity_smoother',
-                executable='velocity_smoother',
-                name='velocity_smoother',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings
-                + [('cmd_vel', 'cmd_vel_nav')],
-            ),
-            Node(
-                package='nav2_collision_monitor',
-                executable='collision_monitor',
-                name='collision_monitor',
-                output='screen',
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params],
-                arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings,
-            ),
-            # Node(
-            #     package='opennav_docking',
-            #     executable='opennav_docking',
-            #     name='docking_server',
-            #     output='screen',
-            #     respawn=use_respawn,
-            #     respawn_delay=2.0,
-            #     parameters=[configured_params],
-            #     arguments=['--ros-args', '--log-level', log_level],
-            #     remappings=remappings,
-            # ),
-            Node(
-                package='nav2_lifecycle_manager',
-                executable='lifecycle_manager',
-                name='lifecycle_manager_navigation',
-                output='screen',
-                arguments=['--ros-args', '--log-level', log_level],
-                parameters=[{'autostart': autostart}, {'node_names': lifecycle_nodes}],
-            ),
-        ],
-    )
-
-    load_composable_nodes = GroupAction(
-        condition=IfCondition(use_composition),
-        actions=[
-            SetParameter('use_sim_time', use_sim_time),
-            LoadComposableNodes(
-                target_container=container_name_full,
-                composable_node_descriptions=[
-                    ComposableNode(
-                        package='nav2_controller',
-                        plugin='nav2_controller::ControllerServer',
-                        name='controller_server',
-                        parameters=[configured_params],
-                        remappings=remappings + [('cmd_vel', 'cmd_vel_nav')],
-                    ),
-                    ComposableNode(
-                        package='nav2_smoother',
-                        plugin='nav2_smoother::SmootherServer',
-                        name='smoother_server',
-                        parameters=[configured_params],
-                        remappings=remappings,
-                    ),
-                    ComposableNode(
-                        package='nav2_planner',
-                        plugin='nav2_planner::PlannerServer',
-                        name='planner_server',
-                        parameters=[configured_params],
-                        remappings=remappings,
-                    ),
-                    ComposableNode(
-                        package='nav2_route',
-                        plugin='nav2_route::RouteServer',
-                        name='route_server',
-                        parameters=[configured_params],
-                        remappings=remappings,
-                    ),
-                    ComposableNode(
-                        package='nav2_behaviors',
-                        plugin='behavior_server::BehaviorServer',
-                        name='behavior_server',
-                        parameters=[configured_params],
-                        remappings=remappings + [('cmd_vel', 'cmd_vel_nav')],
-                    ),
-                    ComposableNode(
-                        package='nav2_bt_navigator',
-                        plugin='nav2_bt_navigator::BtNavigator',
-                        name='bt_navigator',
-                        parameters=[configured_params],
-                        remappings=remappings,
-                    ),
-                    ComposableNode(
-                        package='nav2_waypoint_follower',
-                        plugin='nav2_waypoint_follower::WaypointFollower',
-                        name='waypoint_follower',
-                        parameters=[configured_params],
-                        remappings=remappings,
-                    ),
-                    ComposableNode(
-                        package='nav2_velocity_smoother',
-                        plugin='nav2_velocity_smoother::VelocitySmoother',
-                        name='velocity_smoother',
-                        parameters=[configured_params],
-                        remappings=remappings
-                        + [('cmd_vel', 'cmd_vel_nav')],
-                    ),
-                    ComposableNode(
-                        package='nav2_collision_monitor',
-                        plugin='nav2_collision_monitor::CollisionMonitor',
-                        name='collision_monitor',
-                        parameters=[configured_params],
-                        remappings=remappings,
-                    ),
-                    # ComposableNode(
-                    #     package='opennav_docking',
-                    #     plugin='opennav_docking::DockingServer',
-                    #     name='docking_server',
-                    #     parameters=[configured_params],
-                    #     remappings=remappings,
-                    # ),
-                    ComposableNode(
-                        package='nav2_lifecycle_manager',
-                        plugin='nav2_lifecycle_manager::LifecycleManager',
-                        name='lifecycle_manager_navigation',
-                        parameters=[
-                            {'autostart': autostart, 'node_names': lifecycle_nodes}
-                        ],
-                    ),
-                ],
-            ),
-        ],
-    )
-
-    # Create the launch description and populate
-    ld = LaunchDescription()
-
-    # Set environment variables
-    ld.add_action(stdout_linebuf_envvar)
-
-    # Declare the launch options
-    ld.add_action(declare_namespace_cmd)
-    ld.add_action(declare_use_sim_time_cmd)
-    ld.add_action(declare_params_file_cmd)
-    ld.add_action(declare_autostart_cmd)
-    ld.add_action(declare_use_composition_cmd)
-    ld.add_action(declare_container_name_cmd)
-    ld.add_action(declare_use_respawn_cmd)
-    ld.add_action(declare_log_level_cmd)
-    # Add the actions to launch all of the navigation nodes
-    ld.add_action(load_nodes)
-    ld.add_action(load_composable_nodes)
-
-    return ld
+        DeclareLaunchArgument("log_system_stats", default_value="true"),
+        DeclareLaunchArgument("log_tf_health", default_value="true"),
+        DeclareLaunchArgument("log_twist", default_value="true",
+                              description="CSV: cmd vs odom twist + effort to ~/ros2_ws/logs"),
+        DeclareLaunchArgument("log_stuck", default_value="true",
+                              description="cmd vs odom stall detector -> /robot_stuck"),
+        OpaqueFunction(function=_launch_setup),
+    ])

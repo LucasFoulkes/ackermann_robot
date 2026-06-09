@@ -1,0 +1,14 @@
+stuck_monitor:
+  ros__parameters:
+    cmd_topic: "/cmd_vel_nav"
+    cmd_fallback_topic: "/cmd_vel"
+    odom_topic: "/odom"
+    stuck_topic: "/robot_stuck"
+    # Nav2 / recovery typically commands >= 0.10 m/s; ignore tiny trims.
+    cmd_min_linear: 0.06
+    cmd_min_angular: 0.20
+    odom_min_linear: 0.025
+    min_displacement_m: 0.04
+    stuck_time_s: 2.5
+    cmd_grace_s: 0.4
+    check_hz: 10.0
