@@ -45,6 +45,14 @@ def generate_launch_description():
         name="camera",
         output="screen",
         parameters=[{
+            # Frame prefix MUST match the URDF sensor_d435i macro (name="d435i")
+            # so the cloud/IMU frames (d435i_*_optical_frame) connect to base_link
+            # via robot_state_publisher. The default "camera" left them in a
+            # separate TF tree, so depth_floor_scan could not transform obstacles
+            # into base_link and /camera/scan stayed empty.
+            "camera_name": "d435i",
+            # Low depth res/rate: floor scan needs only coarse ~8Hz depth; cuts CPU.
+            "depth_module.depth_profile": "424x240x15",
             "enable_gyro": True,
             "enable_accel": True,
             # 0-None, 1-copy, 2-linear_interpolation. 2 = one fused imu topic.

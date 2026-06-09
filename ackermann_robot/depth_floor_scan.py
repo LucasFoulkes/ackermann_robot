@@ -193,7 +193,11 @@ class DepthFloorScan(Node):
 
         haf = xyz @ n + d
         obst = xyz[(haf >= self.min_h) & (haf <= self.max_h)]
-        now = self.get_clock().now().to_msg()
+        # Stamp the scan with the cloud's CAPTURE time, not processing time, so the
+        # costmap can time-correct it (camera->base_link is static, so transforming
+        # the points at latest TF is still valid). Using 'now' made stale obstacles
+        # look current on a moving robot -> ghosts.
+        now = msg.header.stamp
         if obst.shape[0] == 0:
             self._publish_scan(now, np.full(self.n_bins, np.inf))
             return

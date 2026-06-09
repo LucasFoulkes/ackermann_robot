@@ -6,15 +6,15 @@ depth_floor_scan:
     scan_frame: "base_link"
     process_hz: 8.0
     ransac_distance: 0.02
-    ransac_iterations: 60
+    ransac_iterations: 40
     min_floor_inliers: 600
-    max_points: 7000
+    max_points: 3500
     # Optical frame: y down, z forward — seed RANSAC on lower/forward points (floor).
     floor_seed_min_y: 0.05
     floor_seed_min_z: 0.20
     # Floor stripped by RANSAC; keep obstacles from floor up to robot top
     # (URDF: body_clearance 0.030 + body_height 0.165 = 0.195 m).
-    min_obstacle_height: 0.02
+    min_obstacle_height: 0.04   # >= floor-fit jitter (height ~+/-0.01 m, tilt 1.5-3.3 deg); 0.02 flagged floor noise as obstacles
     max_obstacle_height: 0.195
     angle_min: -1.0
     angle_max: 1.0

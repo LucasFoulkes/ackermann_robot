@@ -3,8 +3,17 @@
 
 Pipeline:
   1. Bicycle model (wheelbase from URDF): v, w -> logical steer + logical throttle
-  2. logical_to_raw(): compensate motor/servo deadband (tune in cmd_vel_to_effort.yaml)
-  3. Publish Float32MultiArray [data[0]=steer, data[1]=throttle]
+  2. Optional PI trims from /odom twist (feedforward stays dominant, PI only
+     removes steady-state error):
+       - speed loop (closed_loop):     linear.x  error -> throttle trim
+       - yaw  loop (yaw_closed_loop):  angular.z error -> steering trim
+     The yaw loop is the only steering feedback we have (no steering-angle
+     sensor): measured yaw rate + measured speed give an estimated effective
+     steering angle, and the PI cancels linkage slop / asymmetric deadband.
+     Deliberately NO D term anywhere: odom twist (rf2o + IMU) is too noisy to
+     differentiate, and a jittery steering loop is dangerous.
+  3. logical_to_raw(): compensate motor/servo deadband (tune in cmd_vel_to_effort.yaml)
+  4. Publish Float32MultiArray [data[0]=steer, data[1]=throttle]
 
 Measurements (robot.urdf.xacro):
   wheelbase = 0.2775 m  (rear axle to front axle)
@@ -49,31 +58,52 @@ class CmdVelToEffort(Node):
         self.steer_dead_pos = float(p("steer_deadband_pos", 0.55))
         self.steer_dead_neg = float(p("steer_deadband_neg", 0.60))
 
+        # --- speed PI (throttle trim from odom linear.x) ---
         self.closed_loop = bool(p("closed_loop", False))
+        self.kp = float(p("vel_kp", 0.3))
         self.ki = float(p("vel_ki", 0.3))
         self.trim_max = float(p("vel_trim_max", 0.2))
         self.odom_timeout_ns = int(float(p("odom_timeout_s", 0.5)) * 1e9)
 
+        # --- yaw-rate PI (steering trim from odom angular.z, only while moving) ---
+        self.yaw_closed_loop = bool(p("yaw_closed_loop", False))
+        self.yaw_kp = float(p("yaw_kp", 0.4))
+        self.yaw_ki = float(p("yaw_ki", 0.3))
+        self.yaw_trim_max = float(p("yaw_trim_max", 0.25))
+        self.yaw_int_max = float(p("yaw_int_max", 0.3))
+        # Below this |v| yaw rate carries no steering information (omega = v*tan(delta)/L).
+        self.yaw_min_speed = float(p("yaw_min_speed", 0.10))
+
+        self.publish_debug = bool(p("publish_debug", False))
+
         self.cmd = (0.0, 0.0)
         self.last_cmd_ns = self.get_clock().now().nanoseconds
         self.v_meas = 0.0
+        self.w_meas = 0.0
         self.last_odom_ns = 0
         self.integral = 0.0
+        self.yaw_integral = 0.0
 
         self.create_subscription(Twist, p("cmd_topic", "/cmd_vel"), self._on_cmd, 10)
         self.create_subscription(
             TwistStamped, p("cmd_stamped_topic", "/cmd_vel_nav"),
             lambda m: self._on_cmd(m.twist), 10)
-        if self.closed_loop:
+        if self.closed_loop or self.yaw_closed_loop:
             self.create_subscription(Odometry, p("odom_topic", "/odom"), self._on_odom, 10)
         self.pub = self.create_publisher(
             Float32MultiArray, p("effort_topic", "/ackermann/cmd_effort"), 10)
+        self.pub_debug = (
+            self.create_publisher(Float32MultiArray, "/cmd_vel_to_effort/debug", 5)
+            if self.publish_debug else None
+        )
         self.create_timer(self.dt, self._tick)
 
         self.get_logger().info(
             f"wheelbase={self.L:.4f} m, max_speed={self.max_speed:.2f} m/s, "
             f"max_steer={math.degrees(self.max_steer):.1f} deg "
-            f"(kappa_max={self.kappa_max:.2f} 1/m), deadband={self.apply_deadband}")
+            f"(kappa_max={self.kappa_max:.2f} 1/m), deadband={self.apply_deadband}, "
+            f"speed_pi={self.closed_loop} (kp={self.kp} ki={self.ki}), "
+            f"yaw_pi={self.yaw_closed_loop} (kp={self.yaw_kp} ki={self.yaw_ki})")
 
     def _on_cmd(self, msg: Twist):
         self.cmd = (msg.linear.x, msg.angular.z)
@@ -81,6 +111,7 @@ class CmdVelToEffort(Node):
 
     def _on_odom(self, msg: Odometry):
         self.v_meas = msg.twist.twist.linear.x
+        self.w_meas = msg.twist.twist.angular.z
         self.last_odom_ns = self.get_clock().now().nanoseconds
 
     def _raw_throttle(self, logical: float) -> float:
@@ -96,9 +127,16 @@ class CmdVelToEffort(Node):
     def _tick(self):
         now = self.get_clock().now().nanoseconds
         if now - self.last_cmd_ns > self.timeout_ns:
-            v, w = 0.0, 0.0
-        else:
-            v, w = self.cmd
+            # Stale cmd: hard neutral. No trims either — the yaw PI must not
+            # counter-steer a coasting robot that nobody is commanding.
+            self.integral = 0.0
+            self.yaw_integral = 0.0
+            self.pub.publish(Float32MultiArray(data=[0.0, 0.0]))
+            if self.pub_debug is not None:
+                self.pub_debug.publish(Float32MultiArray(data=[
+                    0.0, 0.0, float(self.v_meas), float(self.w_meas)]))
+            return
+        v, w = self.cmd
 
         if abs(v) > self.v_eps:
             # Nav2 RPP has no Ackermann limit — it can command |w| >> |v|*kappa_max when
@@ -109,14 +147,21 @@ class CmdVelToEffort(Node):
         else:
             steer_log = 0.0
 
+        steer_trim = self._steer_trim(steer_log, v, now)
+        steer_log = clamp(steer_log + steer_trim)
+
         throttle_log = clamp(v / self.max_speed, -1.0, 1.0)
-        if self.closed_loop:
-            throttle_log = clamp(throttle_log + self._speed_trim(v, now), -1.0, 1.0)
+        speed_trim = self._speed_trim(v, now) if self.closed_loop else 0.0
+        throttle_log = clamp(throttle_log + speed_trim)
 
         steer = self._raw_steer(steer_log)
         throttle = self._raw_throttle(throttle_log)
 
         self.pub.publish(Float32MultiArray(data=[float(steer), float(throttle)]))
+        if self.pub_debug is not None:
+            self.pub_debug.publish(Float32MultiArray(data=[
+                float(speed_trim), float(steer_trim),
+                float(self.v_meas), float(self.w_meas)]))
 
     def _speed_trim(self, v_cmd, now):
         if abs(v_cmd) < 0.05 or (now - self.last_odom_ns) > self.odom_timeout_ns:
@@ -124,7 +169,33 @@ class CmdVelToEffort(Node):
             return 0.0
         err = v_cmd - self.v_meas
         self.integral = clamp(self.integral + err * self.dt, -0.3, 0.3)
-        return clamp(self.ki * self.integral, -self.trim_max, self.trim_max)
+        return clamp(self.kp * err + self.ki * self.integral,
+                     -self.trim_max, self.trim_max)
+
+    def _steer_trim(self, steer_log_des, v_cmd, now):
+        """PI on the estimated effective steering angle from odom yaw rate.
+
+        delta_est = atan(L * w_meas / v): with the bicycle model, measured yaw
+        rate + speed imply what the front wheels are actually doing. Error is
+        computed in normalized steer-effort space (same units as steer_log) so
+        the gains are dimensionless. Using v in the atan keeps the sign correct
+        when reversing (same steer angle gives opposite omega in reverse).
+        """
+        if not self.yaw_closed_loop:
+            return 0.0
+        if (now - self.last_odom_ns) > self.odom_timeout_ns:
+            self.yaw_integral = 0.0
+            return 0.0
+        v_ref = self.v_meas if abs(self.v_meas) > self.v_eps else v_cmd
+        if abs(v_ref) < self.yaw_min_speed:
+            self.yaw_integral = 0.0
+            return 0.0
+        delta_est = math.atan(self.L * self.w_meas / v_ref)
+        err = steer_log_des - clamp(delta_est / self.max_steer)
+        self.yaw_integral = clamp(self.yaw_integral + err * self.dt,
+                                  -self.yaw_int_max, self.yaw_int_max)
+        return clamp(self.yaw_kp * err + self.yaw_ki * self.yaw_integral,
+                     -self.yaw_trim_max, self.yaw_trim_max)
 
 
 def main(args=None):

@@ -22,7 +22,7 @@ ekf_filter_node:
     use_control: false
 
     # --- RF2O (remapped to /odom_rf2o in odom_fusion_experiment.launch.py) ---
-    odom0: /odom_rf2o
+    odom0: /odom_icp
     odom0_config: [true,  true,  false,
                    false, false, true,
                    true,  false, false,

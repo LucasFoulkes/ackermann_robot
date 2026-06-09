@@ -102,7 +102,7 @@ def _launch_setup(context, *args, **kwargs):
             [
                 ("use_imu", "true" if use_imu else "false"),
                 ("enable_depth", depth_on),
-                ("enable_color", depth_on),
+                ("enable_color", "false"),  # floor scan uses xyz only; color = pure CPU
                 ("enable_pointcloud", depth_on),
             ],
         ))
@@ -112,7 +112,7 @@ def _launch_setup(context, *args, **kwargs):
     if use_floor_scan and not use_imu:
         actions.append(include("d435i.launch.py", [
             ("enable_depth", "true"),
-            ("enable_color", "true"),
+            ("enable_color", "false"),
             ("enable_pointcloud", "true"),
         ]))
     if use_floor_scan:
@@ -201,11 +201,11 @@ def generate_launch_description():
             "use_floor_scan", default_value="true",
             description="D435i depth RANSAC -> /camera/scan for local costmap",
         ),
-        DeclareLaunchArgument("log_system_stats", default_value="true"),
-        DeclareLaunchArgument("log_tf_health", default_value="true"),
-        DeclareLaunchArgument("log_twist", default_value="true",
+        DeclareLaunchArgument("log_system_stats", default_value="false"),
+        DeclareLaunchArgument("log_tf_health", default_value="false"),
+        DeclareLaunchArgument("log_twist", default_value="false",
                               description="CSV: cmd vs odom twist + effort to ~/ros2_ws/logs"),
-        DeclareLaunchArgument("log_stuck", default_value="true",
+        DeclareLaunchArgument("log_stuck", default_value="false",
                               description="cmd vs odom stall detector -> /robot_stuck"),
         OpaqueFunction(function=_launch_setup),
     ])

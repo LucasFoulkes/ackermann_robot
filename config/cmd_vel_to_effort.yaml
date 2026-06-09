@@ -19,7 +19,27 @@ cmd_vel_to_effort:
     steer_deadband_pos: 0.55      # data[0] positive (right)
     steer_deadband_neg: 0.60      # data[0] negative (left)
 
-    closed_loop: false
+    closed_loop: true    # match drive.launch.py default (yaml said false -> split-brain)
     control_hz: 50.0
     cmd_timeout_s: 0.5
     v_epsilon: 0.02
+
+    # --- Closed-loop PI trims (/odom twist feedback; feedforward stays dominant) ---
+    # Speed loop (linear.x -> throttle). closed_loop above enables it.
+    vel_kp: 0.3
+    vel_ki: 0.3
+    vel_trim_max: 0.2
+    # Yaw-rate loop (angular.z -> steering, only while |v| > yaw_min_speed).
+    # Cancels linkage slop + asymmetric deadband using IMU/odom yaw rate — the
+    # only steering feedback we have (no angle sensor on the servo).
+    # Tuning: weaving -> halve yaw_kp; pulls harder off-line than before ->
+    # sign mismatch, set yaw_kp/yaw_ki to 0.0 and investigate.
+    yaw_closed_loop: true
+    yaw_kp: 0.4
+    yaw_ki: 0.3
+    yaw_trim_max: 0.25
+    yaw_int_max: 0.3
+    yaw_min_speed: 0.10
+    # /cmd_vel_to_effort/debug [speed_trim, steer_trim, v_meas, w_meas] @ control_hz
+    # for PlotJuggler tuning. Turn off once gains are settled.
+    publish_debug: true
