@@ -183,7 +183,10 @@ class PersonTracker(Node):
         return legs, blobs
 
     def pair_candidates(self, legs, blobs):
-        """Person candidates: midpoint of a leg pair, or a merged-legs blob."""
+        """Person candidates (pair midpoints + merged-legs blobs) and the
+        leftover single legs. Singles can UPDATE an existing track (feet
+        apart / one leg occluded) but never create one — keeps clutter out
+        while stopping track dropouts that made the marker coast away."""
         cands = []
         used = set()
         for i in range(len(legs)):
@@ -201,7 +204,8 @@ class PersonTracker(Node):
                 used.add(best_j)
                 cands.append((legs[i] + legs[best_j]) / 2.0)
         cands.extend(blobs)
-        return cands
+        singles = [legs[i] for i in range(len(legs)) if i not in used]
+        return cands, singles
 
     # --- frames / map veto -------------------------------------------------
 
@@ -248,12 +252,13 @@ class PersonTracker(Node):
         self.last_scan_s = now_s
 
         legs, blobs = self.leg_candidates(self.clusters_from_scan(msg))
-        cands_laser = self.pair_candidates(legs, blobs)
+        cands_laser, singles_laser = self.pair_candidates(legs, blobs)
 
         tf_fix = self.tf2d(self.fixed_frame, msg.header.frame_id, msg.header.stamp)
         if tf_fix is None:
             return  # no odom TF yet
         cands = self.apply2d(tf_fix, cands_laser)
+        singles = self.apply2d(tf_fix, singles_laser)
 
         if self.use_map_veto and self.map_msg is not None and cands:
             tf_map = self.tf2d(self.map_msg.header.frame_id, self.fixed_frame,
@@ -276,6 +281,21 @@ class PersonTracker(Node):
                 t.update(cands[unmatched[k]], self.sigma_obs)
                 t.last_seen_s = now_s
                 unmatched.pop(k)
+        # second pass: lone legs may update tracks that got no pair this scan
+        free_singles = list(range(len(singles)))
+        for t in sorted(self.tracks, key=lambda t: -t.hits):
+            if not free_singles or t.last_seen_s == now_s:
+                continue
+            ds = [float(np.linalg.norm(singles[i] - t.xy)) for i in free_singles]
+            k = int(np.argmin(ds))
+            if ds[k] <= self.gate_dist:
+                t.update(singles[free_singles[k]], self.sigma_obs)
+                t.last_seen_s = now_s
+                free_singles.pop(k)
+        # coasting tracks: damp velocity so the marker cannot glide away
+        for t in self.tracks:
+            if t.last_seen_s != now_s:
+                t.x[2:] *= 0.85
         for i in unmatched:
             self.tracks.append(Track(cands[i], now_s, self.sigma_obs))
 
