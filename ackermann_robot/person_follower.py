@@ -19,7 +19,10 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.action import NavigateToPose
+from rclpy.qos import (QoSDurabilityPolicy, QoSProfile,
+                       QoSReliabilityPolicy)
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
@@ -40,6 +43,10 @@ class PersonFollower(Node):
         self.lost_timeout_s = float(p("lost_timeout_s", 8.0))
         self.goal_frame = str(p("goal_frame", "map"))
         self.update_min_period_s = float(p("update_min_period_s", 0.3))
+        # only START a chase toward a recently-seen person; the longer
+        # lost_timeout_s only governs when an active goal is cancelled
+        self.send_max_age_s = float(p("send_max_age_s", 1.5))
+        self.abort_backoff_s = float(p("abort_backoff_s", 1.0))
 
         self.enabled = bool(p("start_enabled", True))
         self.goal_handle = None
@@ -47,12 +54,19 @@ class PersonFollower(Node):
         self.last_target = None          # PoseStamped in goal_frame
         self.last_target_s = None
         self.last_update_s = 0.0
+        self.next_send_s = 0.0
+        self.map_bounds = None           # (x0, y0, x1, y1) of global costmap
 
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
         self.create_subscription(PoseStamped, "/person_target", self.on_target, 10)
+        cm_qos = QoSProfile(depth=1,
+                            reliability=QoSReliabilityPolicy.RELIABLE,
+                            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(OccupancyGrid, "/global_costmap/costmap",
+                                 self.on_costmap, cm_qos)
         self.pub_update = self.create_publisher(PoseStamped, "/goal_update", 10)
         self.pub_status = self.create_publisher(String, "/follow/status", 5)
         self.create_service(SetBool, "/follow/enable", self.on_enable)
@@ -98,6 +112,21 @@ class PersonFollower(Node):
                 back = min(self.standoff, d)
                 gx = px - (px - rx) / d * back
                 gy = py - (py - ry) / d * back
+            # Smac hard-fails on goals outside the (SLAM-map-sized) global
+            # costmap; walk the goal toward the robot until inside bounds
+            if self.map_bounds is not None:
+                x0, y0, x1, y1 = self.map_bounds
+                clamped = False
+                for _ in range(25):
+                    if x0 <= gx <= x1 and y0 <= gy <= y1:
+                        break
+                    gx = rx + (gx - rx) * 0.85
+                    gy = ry + (gy - ry) * 0.85
+                    clamped = True
+                if clamped:
+                    self.get_logger().info(
+                        "person outside mapped area — goal clamped into map "
+                        "bounds", throttle_duration_sec=5.0)
         except Exception:
             pass
         out.pose.position.x = gx
@@ -122,6 +151,14 @@ class PersonFollower(Node):
         res.message = "following enabled" if self.enabled else "following disabled"
         self.status(res.message)
         return res
+
+    def on_costmap(self, m):
+        margin = 0.15
+        x0 = m.info.origin.position.x
+        y0 = m.info.origin.position.y
+        self.map_bounds = (x0 + margin, y0 + margin,
+                           x0 + m.info.width * m.info.resolution - margin,
+                           y0 + m.info.height * m.info.resolution - margin)
 
     def on_target(self, ps):
         goal_ps = self.to_goal_frame(ps)
@@ -169,13 +206,25 @@ class PersonFollower(Node):
     def tick(self):
         if not self.enabled:
             return
-        fresh = (self.last_target_s is not None
-                 and self.now_s() - self.last_target_s < self.lost_timeout_s)
+        age = (None if self.last_target_s is None
+               else self.now_s() - self.last_target_s)
+        fresh = age is not None and age < self.lost_timeout_s
+        recent = age is not None and age < self.send_max_age_s
 
-        if self.goal_handle is None and not self.goal_pending and fresh:
+        if (self.goal_handle is None and not self.goal_pending and recent
+                and self.now_s() >= self.next_send_s):
             self.send_goal()
         elif self.goal_handle is not None and not fresh:
             self.cancel_goal(f"person lost > {self.lost_timeout_s:.0f}s")
+        elif (self.goal_handle is not None and not recent
+                and self.last_target is not None
+                and self.now_s() - self.last_update_s >= 1.0):
+            # target stale but goal still active: re-stamp the last-seen pose
+            # so the BT GoalUpdater never holds an update older than the goal
+            # (that mismatch made bt_navigator warn at tick rate)
+            self.last_target.header.stamp = self.get_clock().now().to_msg()
+            self.pub_update.publish(self.last_target)
+            self.last_update_s = self.now_s()
 
     # --- nav2 action --------------------------------------------------------
 
@@ -189,6 +238,8 @@ class PersonFollower(Node):
         self.goal_pending = True
         fut = self.nav_client.send_goal_async(goal)
         fut.add_done_callback(self.on_goal_response)
+        self.pub_update.publish(goal.pose)  # GoalUpdater cache >= goal stamp
+        self.last_update_s = self.now_s()
         d = self.target_distance()
         self.status(
             f"sending follow goal ({goal.pose.pose.position.x:.2f}, "
@@ -211,6 +262,8 @@ class PersonFollower(Node):
         except Exception:
             st = -1
         names = {4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
+        if st == 6:
+            self.next_send_s = self.now_s() + self.abort_backoff_s
         self.status(f"follow goal ended: {names.get(st, f'status {st}')}")
 
     def cancel_goal(self, why):

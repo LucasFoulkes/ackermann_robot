@@ -49,6 +49,7 @@ class Track:
         self.confirmed = False
         self.hits = 1
         self.still_since_s = None
+        self.sep_hist = []               # observed leg separation / blob width
 
     def predict(self, dt, sigma_acc):
         F = np.eye(4)
@@ -65,7 +66,7 @@ class Track:
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
 
-    def update(self, xy, sigma_obs):
+    def update(self, xy, sigma_obs, sep=None):
         H = np.array([[1.0, 0, 0, 0], [0, 1.0, 0, 0]])
         R = np.eye(2) * sigma_obs**2
         y = np.asarray(xy) - H @ self.x
@@ -76,6 +77,10 @@ class Track:
         self.hits += 1
         self.path_len += float(np.linalg.norm(self.x[:2] - self.prev_xy))
         self.prev_xy = self.x[:2].copy()
+        if sep is not None:
+            self.sep_hist.append(float(sep))
+            if len(self.sep_hist) > 40:
+                self.sep_hist.pop(0)
 
     @property
     def xy(self):
@@ -93,6 +98,14 @@ class Track:
     def straightness(self):
         """Displacement / path length: ~1 for walking, low for cluster jitter."""
         return self.travelled / self.path_len if self.path_len > 0.05 else 0.0
+
+    @property
+    def gait_osc(self):
+        """Leg-separation oscillation (m). Walking legs swing apart/together
+        every step; static pairs (gap edges, posts) keep constant spacing."""
+        if len(self.sep_hist) < 5:
+            return 0.0
+        return max(self.sep_hist) - min(self.sep_hist)
 
 
 class PersonTracker(Node):
@@ -115,6 +128,7 @@ class PersonTracker(Node):
         self.confirm_travel = float(p("confirm_travel_m", 0.5))   # leg_tracker
         self.confirm_straightness = float(p("confirm_straightness", 0.6))
         self.confirm_speed_min = float(p("confirm_speed_min", 0.25))
+        self.gait_osc_min = float(p("gait_osc_min", 0.07))
         self.still_defect_s = float(p("still_defect_s", 5.0))
         self.drop_after_s = float(p("drop_after_s", 1.5))
         self.drop_confirmed_after_s = float(p("drop_confirmed_after_s", 3.0))
@@ -175,7 +189,7 @@ class PersonTracker(Node):
         return [c for c in clusters if len(c) >= self.min_points]
 
     def leg_candidates(self, clusters):
-        legs, blobs = [], []
+        legs, blobs, blob_w = [], [], []
         for c in clusters:
             width = float(np.linalg.norm(c[0] - c[-1]))
             centroid = c.mean(axis=0)
@@ -183,14 +197,15 @@ class PersonTracker(Node):
                 legs.append(centroid)
             elif self.leg_w_max < width <= self.blob_w_max:
                 blobs.append(centroid)   # possibly two legs close together
-        return legs, blobs
+                blob_w.append(width)
+        return legs, blobs, blob_w
 
-    def pair_candidates(self, legs, blobs):
+    def pair_candidates(self, legs, blobs, blob_w):
         """Person candidates (pair midpoints + merged-legs blobs) and the
         leftover single legs. Singles can UPDATE an existing track (feet
         apart / one leg occluded) but never create one — keeps clutter out
         while stopping track dropouts that made the marker coast away."""
-        cands = []
+        cands, seps = [], []
         used = set()
         for i in range(len(legs)):
             if i in used:
@@ -206,9 +221,11 @@ class PersonTracker(Node):
                 used.add(i)
                 used.add(best_j)
                 cands.append((legs[i] + legs[best_j]) / 2.0)
+                seps.append(best_d)
         cands.extend(blobs)
+        seps.extend(blob_w)
         singles = [legs[i] for i in range(len(legs)) if i not in used]
-        return cands, singles
+        return cands, seps, singles
 
     # --- frames / map veto -------------------------------------------------
 
@@ -250,7 +267,7 @@ class PersonTracker(Node):
         dt = 0.1 if self.last_scan_s is None else max(0.01, min(0.5, now_s - self.last_scan_s))
         self.last_scan_s = now_s
 
-        legs, blobs = self.leg_candidates(self.clusters_from_scan(msg))
+        legs, blobs, blob_w = self.leg_candidates(self.clusters_from_scan(msg))
 
         tf_fix = self.tf2d(self.fixed_frame, msg.header.frame_id, msg.header.stamp)
         if tf_fix is None:
@@ -262,16 +279,26 @@ class PersonTracker(Node):
         # objects (walls, pots) otherwise pair across a small gap and the pair
         # midpoint sits in free space where a midpoint-veto cannot see it
         n_legs_pre, n_blobs_pre = len(legs), len(blobs)
+        vetoed = []
         if self.use_map_veto and self.map_msg is not None and (legs or blobs):
             tf_map = self.tf2d(self.map_msg.header.frame_id, self.fixed_frame,
                                msg.header.stamp)
             if tf_map is not None:
-                legs = [l for l, lm in zip(legs, self.apply2d(tf_map, legs))
-                        if not self.on_static_map(lm)]
-                blobs = [b for b, bm in zip(blobs, self.apply2d(tf_map, blobs))
-                         if not self.on_static_map(bm)]
+                keep_l = [not self.on_static_map(m)
+                          for m in self.apply2d(tf_map, legs)]
+                keep_b = [not self.on_static_map(m)
+                          for m in self.apply2d(tf_map, blobs)]
+                # vetoed points may still UPDATE an existing track — slam
+                # absorbs a lingering person into the map, which otherwise
+                # starves + drops their confirmed track — but never create one
+                vetoed = ([l for l, k in zip(legs, keep_l) if not k]
+                          + [b for b, k in zip(blobs, keep_b) if not k])
+                legs = [l for l, k in zip(legs, keep_l) if k]
+                blobs = [b for b, k in zip(blobs, keep_b) if k]
+                blob_w = [w for w, k in zip(blob_w, keep_b) if k]
 
-        cands, singles = self.pair_candidates(legs, blobs)
+        cands, cand_seps, singles = self.pair_candidates(legs, blobs, blob_w)
+        singles = singles + vetoed
         if self.debug:
             self.get_logger().info(
                 f"legs {n_legs_pre}->{len(legs)} blobs {n_blobs_pre}->{len(blobs)} "
@@ -290,7 +317,8 @@ class PersonTracker(Node):
             ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
             k = int(np.argmin(ds))
             if ds[k] <= self.gate_dist:
-                t.update(cands[unmatched[k]], self.sigma_obs)
+                t.update(cands[unmatched[k]], self.sigma_obs,
+                         cand_seps[unmatched[k]])
                 t.last_seen_s = now_s
                 unmatched.pop(k)
         # second pass: lone legs may update tracks that got no pair this scan
@@ -325,12 +353,14 @@ class PersonTracker(Node):
             if (not t.confirmed and t.travelled >= self.confirm_travel
                     and t.hits >= 8
                     and t.straightness >= self.confirm_straightness
+                    and t.gait_osc >= self.gait_osc_min
                     and self.confirm_speed_min <= t.speed <= self.max_speed):
                 t.confirmed = True
                 self.get_logger().info(
                     f"person {t.id} confirmed at ({t.xy[0]:.2f}, {t.xy[1]:.2f}) "
                     f"odom (travelled {t.travelled:.2f} m, straightness "
-                    f"{t.straightness:.2f}, {t.speed:.2f} m/s, hits {t.hits})")
+                    f"{t.straightness:.2f}, {t.speed:.2f} m/s, gait "
+                    f"{t.gait_osc:.2f} m, hits {t.hits})")
             if t.speed < 0.25:
                 if t.still_since_s is None:
                     t.still_since_s = now_s
