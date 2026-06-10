@@ -38,7 +38,7 @@ class PersonFollower(Node):
             "/behavior_trees/follow_person.xml"
         self.bt_xml = str(p("behavior_tree", default_bt))
         self.retreat_dist = float(p("retreat_dist", 0.40))
-        self.standoff = float(p("standoff_m", 0.75))
+        self.standoff = float(p("standoff_m", 0.45))
         self.resume_dist = float(p("resume_dist", 0.70))
         self.retreat_speed = float(p("retreat_speed", 0.13))
         self.retreat_max_s = float(p("retreat_max_s", 4.0))
