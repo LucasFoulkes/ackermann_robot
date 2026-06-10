@@ -16,8 +16,8 @@ cmd_vel_to_effort:
     # Raw /ackermann/cmd_effort deadband (PlotJuggler startup test — starting values)
     throttle_deadband_fwd: 0.45   # forward: below this, motion weak/unreliable
     throttle_deadband_rev: 0.55   # reverse
-    steer_deadband_pos: 0.55      # data[0] positive (right)
-    steer_deadband_neg: 0.60      # data[0] negative (left)
+    steer_deadband_pos: 0.05   # servo is POSITION-proportional (driver maps center + steer*half_range) — 0.55 was mis-measured and quantized steering to >=55% of lock
+    steer_deadband_neg: 0.05   # small linkage-slop allowance; yaw PI trims the rest
 
     closed_loop: true    # match drive.launch.py default (yaml said false -> split-brain)
     control_hz: 50.0
