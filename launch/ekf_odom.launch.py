@@ -56,6 +56,7 @@ def generate_launch_description():
                 "args": "--Reg/Force3DoF true --Odom/ResetCountdown 1",
             }],
             remappings=[("scan", "/scan"), ("odom", "/odom_icp")],
+            arguments=["--ros-args", "--log-level", "icp_odometry:=warn"],
         ),
         include("d435i.launch.py", condition=IfCondition(use_imu), launch_arguments=[
             ("enable_depth", enable_depth),
