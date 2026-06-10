@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Drive Nav2 to follow /person_target using the stock follow_point BT.
+
+Glue between person_tracker and Nav2's dynamic-object-following:
+  - on enable (+ a fresh /person_target): send ONE NavigateToPose goal with
+    behavior_tree=follow_point.xml (replans to a moving goal at 1 Hz and
+    truncates the path 1 m short of the person)
+  - while following: forward each /person_target (odom) to /goal_update
+    (map frame), which the BT's GoalUpdater consumes
+  - person lost > lost_timeout_s, or disabled: cancel the nav goal
+
+Safety: starts DISABLED. Enable with
+  ros2 service call /follow/enable std_srvs/srv/SetBool "{data: true}"
+"""
+import math
+
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from nav2_msgs.action import NavigateToPose
+from std_msgs.msg import String
+from std_srvs.srv import SetBool
+from tf2_ros import Buffer, TransformListener
+
+
+def yaw_of(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+class PersonFollower(Node):
+    def __init__(self):
+        super().__init__("person_follower")
+        p = lambda n, d: self.declare_parameter(n, d).value
+        self.bt_xml = str(p(
+            "behavior_tree",
+            "/opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/follow_point.xml"))
+        self.lost_timeout_s = float(p("lost_timeout_s", 8.0))
+        self.goal_frame = str(p("goal_frame", "map"))
+        self.update_min_period_s = float(p("update_min_period_s", 0.3))
+
+        self.enabled = False
+        self.goal_handle = None
+        self.goal_pending = False
+        self.last_target = None          # PoseStamped in goal_frame
+        self.last_target_s = None
+        self.last_update_s = 0.0
+
+        self.tf_buf = Buffer()
+        self.tf_listener = TransformListener(self.tf_buf, self)
+        self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+
+        self.create_subscription(PoseStamped, "/person_target", self.on_target, 10)
+        self.pub_update = self.create_publisher(PoseStamped, "/goal_update", 10)
+        self.pub_status = self.create_publisher(String, "/follow/status", 5)
+        self.create_service(SetBool, "/follow/enable", self.on_enable)
+        self.create_timer(0.5, self.tick)
+        self.get_logger().info(
+            f"person_follower ready (DISABLED). BT: {self.bt_xml}")
+
+    # --- helpers -----------------------------------------------------------
+
+    def now_s(self):
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def to_goal_frame(self, ps):
+        if ps.header.frame_id == self.goal_frame:
+            return ps
+        try:
+            t = self.tf_buf.lookup_transform(self.goal_frame, ps.header.frame_id,
+                                             rclpy.time.Time())
+        except Exception:
+            return None
+        tr = t.transform.translation
+        yaw = yaw_of(t.transform.rotation)
+        c, s = math.cos(yaw), math.sin(yaw)
+        out = PoseStamped()
+        out.header.stamp = ps.header.stamp
+        out.header.frame_id = self.goal_frame
+        x, y = ps.pose.position.x, ps.pose.position.y
+        out.pose.position.x = tr.x + c * x - s * y
+        out.pose.position.y = tr.y + s * x + c * y
+        pyaw = yaw_of(ps.pose.orientation) + yaw
+        out.pose.orientation.z = math.sin(pyaw / 2)
+        out.pose.orientation.w = math.cos(pyaw / 2)
+        return out
+
+    def status(self, text):
+        self.pub_status.publish(String(data=text))
+        self.get_logger().info(text)
+
+    # --- callbacks ----------------------------------------------------------
+
+    def on_enable(self, req, res):
+        self.enabled = req.data
+        if not self.enabled:
+            self.cancel_goal("follow disabled")
+        res.success = True
+        res.message = "following enabled" if self.enabled else "following disabled"
+        self.status(res.message)
+        return res
+
+    def on_target(self, ps):
+        goal_ps = self.to_goal_frame(ps)
+        if goal_ps is None:
+            return
+        self.last_target = goal_ps
+        self.last_target_s = self.now_s()
+        if (self.goal_handle is not None
+                and self.now_s() - self.last_update_s >= self.update_min_period_s):
+            self.pub_update.publish(goal_ps)
+            self.last_update_s = self.now_s()
+
+    def tick(self):
+        if not self.enabled:
+            return
+        fresh = (self.last_target_s is not None
+                 and self.now_s() - self.last_target_s < self.lost_timeout_s)
+        if self.goal_handle is None and not self.goal_pending and fresh:
+            self.send_goal()
+        elif self.goal_handle is not None and not fresh:
+            self.cancel_goal(f"person lost > {self.lost_timeout_s:.0f}s")
+
+    # --- nav2 action --------------------------------------------------------
+
+    def send_goal(self):
+        if not self.nav_client.server_is_ready():
+            return
+        goal = NavigateToPose.Goal()
+        goal.pose = self.last_target
+        goal.behavior_tree = self.bt_xml
+        self.goal_pending = True
+        fut = self.nav_client.send_goal_async(goal)
+        fut.add_done_callback(self.on_goal_response)
+        self.status("following person")
+
+    def on_goal_response(self, fut):
+        self.goal_pending = False
+        gh = fut.result()
+        if gh is None or not gh.accepted:
+            self.status("nav goal rejected")
+            return
+        self.goal_handle = gh
+        gh.get_result_async().add_done_callback(self.on_result)
+
+    def on_result(self, fut):
+        self.goal_handle = None
+        self.status("follow goal ended")
+
+    def cancel_goal(self, why):
+        if self.goal_handle is not None:
+            self.goal_handle.cancel_goal_async()
+            self.goal_handle = None
+            self.status(f"follow canceled: {why}")
+
+
+def main():
+    rclpy.init()
+    node = PersonFollower()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
