@@ -27,6 +27,7 @@ from geometry_msgs.msg import PoseArray, Pose, PoseStamped
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
+from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 
 
@@ -157,6 +158,15 @@ class PersonTracker(Node):
         self.drop_pos_std = float(p("drop_pos_std", 2.0))
         self.confirm_robot_lin_max = float(p("confirm_robot_lin_max", 0.08))
         self.confirm_robot_ang_max = float(p("confirm_robot_ang_max", 0.15))
+        # enrollment (the default): the target is whoever stands in the front
+        # cone, like every shipped follow-me robot. auto_confirm re-enables
+        # the old confirm-arbitrary-walkers gates.
+        self.enroll_mode = bool(p("enroll_mode", True))
+        self.auto_confirm = bool(p("auto_confirm", False))
+        self.enroll_dist_min = float(p("enroll_dist_min", 0.4))
+        self.enroll_dist_max = float(p("enroll_dist_max", 2.5))
+        self.enroll_half_angle = float(p("enroll_half_angle_rad", 0.5))
+        self.enroll_min_hits = int(p("enroll_min_hits", 5))
         self.reid_window_s = float(p("reid_window_s", 3.0))
         self.reid_dist = float(p("reid_dist", 0.75))
         self.confirm_free_occ_max = float(p("confirm_free_occ_max", 10.0))
@@ -188,13 +198,18 @@ class PersonTracker(Node):
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(OccupancyGrid, "/map", self.on_map, map_qos)
 
+        self.create_service(Trigger, "/follow/enroll", self.on_enroll_srv)
         self.pub_markers = self.create_publisher(MarkerArray, "/people", 5)
         self.pub_poses = self.create_publisher(PoseArray, "/people_poses", 5)
         self.pub_target = self.create_publisher(PoseStamped, "/person_target", 5)
         self.get_logger().info(
             f"person_tracker: legs {self.leg_w_min}-{self.leg_w_max} m, pair "
-            f"<= {self.pair_dist} m, confirm after {self.confirm_travel} m of "
-            f"travel, map veto {'on' if self.use_map_veto else 'off'}")
+            f"<= {self.pair_dist} m, "
+            + (f"ENROLL mode (stand {self.enroll_dist_min}-"
+               f"{self.enroll_dist_max} m in front to be followed)"
+               if self.enroll_mode else
+               f"auto-confirm after {self.confirm_travel} m of travel")
+            + f", map veto {'on' if self.use_map_veto else 'off'}")
 
     def on_map(self, msg):
         self.map_msg = msg
@@ -224,9 +239,9 @@ class PersonTracker(Node):
         for part in parts:
             if len(part) < self.min_points:
                 continue
-            if not self.foreground_ok(r, idx, part):
-                continue
-            out.append(pts[part])
+            # foreground flag gates track CREATION only -- a person's legs
+            # brushing past furniture must still UPDATE their track
+            out.append((pts[part], self.foreground_ok(r, idx, part)))
         return out
 
     def foreground_ok(self, r, idx, part):
@@ -250,22 +265,25 @@ class PersonTracker(Node):
 
     def leg_candidates(self, clusters):
         legs, blobs, blob_w = [], [], []
-        for c in clusters:
+        leg_fg, blob_fg = [], []
+        for c, fg in clusters:
             width = float(np.linalg.norm(c[0] - c[-1]))
             centroid = c.mean(axis=0)
             if self.leg_w_min <= width <= self.leg_w_max:
                 legs.append(centroid)
+                leg_fg.append(fg)
             elif self.leg_w_max < width <= self.blob_w_max:
                 blobs.append(centroid)   # possibly two legs close together
+                blob_fg.append(fg)
                 blob_w.append(width)
-        return legs, blobs, blob_w
+        return legs, leg_fg, blobs, blob_fg, blob_w
 
-    def pair_candidates(self, legs, blobs, blob_w):
+    def pair_candidates(self, legs, leg_fg, blobs, blob_fg, blob_w):
         """Person candidates (pair midpoints + merged-legs blobs) and the
         leftover single legs. Singles can UPDATE an existing track (feet
         apart / one leg occluded) but never create one — keeps clutter out
         while stopping track dropouts that made the marker coast away."""
-        cands, seps = [], []
+        cands, seps, cand_fg = [], [], []
         used = set()
         for i in range(len(legs)):
             if i in used:
@@ -282,10 +300,12 @@ class PersonTracker(Node):
                 used.add(best_j)
                 cands.append((legs[i] + legs[best_j]) / 2.0)
                 seps.append(best_d)
+                cand_fg.append(leg_fg[i] and leg_fg[best_j])
         cands.extend(blobs)
         seps.extend(blob_w)
+        cand_fg.extend(blob_fg)
         singles = [legs[i] for i in range(len(legs)) if i not in used]
-        return cands, seps, singles
+        return cands, seps, cand_fg, singles
 
     # --- frames / map veto -------------------------------------------------
 
@@ -371,6 +391,51 @@ class PersonTracker(Node):
         detail = " ".join(d for _, _, d in checks)
         return fails, detail
 
+    def try_enroll(self, stamp):
+        """Lock onto the nearest stable track in the front cone. Runs every
+        scan while no target is enrolled; the robot must be (near) still so
+        a drive-by chair pair cannot enroll itself."""
+        if (self.robot_lin > self.confirm_robot_lin_max
+                or abs(self.robot_ang) > self.confirm_robot_ang_max):
+            return
+        tf_b = self.tf2d("base_link", self.fixed_frame, stamp)
+        if tf_b is None:
+            return
+        best, best_d = None, None
+        for t in self.tracks:
+            if t.hits < self.enroll_min_hits:
+                continue
+            bx, by = self.apply2d(tf_b, [t.xy])[0]
+            d = math.hypot(bx, by)
+            if not (self.enroll_dist_min <= d <= self.enroll_dist_max):
+                continue
+            if abs(math.atan2(by, bx)) > self.enroll_half_angle:
+                continue
+            if best is None or d < best_d:
+                best, best_d = t, d
+        if best is None:
+            self.get_logger().info(
+                f"no target: stand {self.enroll_dist_min:.1f}-"
+                f"{self.enroll_dist_max:.1f} m in front of the robot to "
+                "enroll", throttle_duration_sec=10.0)
+            return
+        best.confirmed = True
+        self.target_id = best.id
+        self.get_logger().info(
+            f"ENROLLED person {best.id} at {best_d:.2f} m in front -- "
+            "following")
+
+    def on_enroll_srv(self, req, res):
+        for t in self.tracks:
+            t.confirmed = False
+        self.dead_people.clear()
+        self.target_id = None
+        res.success = True
+        res.message = (f"re-enrolling: stand {self.enroll_dist_min:.1f}-"
+                       f"{self.enroll_dist_max:.1f} m in front of the robot")
+        self.get_logger().info(res.message)
+        return res
+
     # --- main loop ---------------------------------------------------------
 
     def on_scan(self, msg):
@@ -378,7 +443,8 @@ class PersonTracker(Node):
         dt = 0.1 if self.last_scan_s is None else max(0.01, min(0.5, now_s - self.last_scan_s))
         self.last_scan_s = now_s
 
-        legs, blobs, blob_w = self.leg_candidates(self.clusters_from_scan(msg))
+        (legs, leg_fg, blobs, blob_fg,
+         blob_w) = self.leg_candidates(self.clusters_from_scan(msg))
 
         tf_fix = self.tf2d(self.fixed_frame, msg.header.frame_id, msg.header.stamp)
         if tf_fix is None:
@@ -421,11 +487,14 @@ class PersonTracker(Node):
                 # starves + drops their confirmed track — but never create one
                 vetoed = ([l for l, k in zip(legs, keep_l) if not k]
                           + [b for b, k in zip(blobs, keep_b) if not k])
+                leg_fg = [f for f, k in zip(leg_fg, keep_l) if k]
+                blob_fg = [f for f, k in zip(blob_fg, keep_b) if k]
                 legs = [l for l, k in zip(legs, keep_l) if k]
                 blobs = [b for b, k in zip(blobs, keep_b) if k]
                 blob_w = [w for w, k in zip(blob_w, keep_b) if k]
 
-        cands, cand_seps, singles = self.pair_candidates(legs, blobs, blob_w)
+        cands, cand_seps, cand_fg, singles = self.pair_candidates(
+            legs, leg_fg, blobs, blob_fg, blob_w)
         singles = singles + vetoed
         if self.debug:
             self.get_logger().info(
@@ -467,6 +536,8 @@ class PersonTracker(Node):
         self.dead_people = [d for d in self.dead_people
                             if now_s - d[2] <= self.reid_window_s]
         for i in unmatched:
+            if not cand_fg[i]:
+                continue   # occluded-edge clusters may update, never create
             t = Track(cands[i], now_s, self.sigma_obs)
             # re-id: a confirmed person who briefly vanished (occlusion, scan
             # dropout) comes back as the same id, already confirmed
@@ -495,7 +566,8 @@ class PersonTracker(Node):
                     self.get_logger().info(f"person {t.id} dropped ({why})")
                     self.dead_people.append((t.id, t.xy.copy(), now_s))
                 continue
-            if (not t.confirmed and t.travelled >= self.confirm_travel
+            if (self.auto_confirm and not t.confirmed
+                    and t.travelled >= self.confirm_travel
                     and t.hits >= 8
                     and t.straightness >= self.confirm_straightness
                     and t.gait_osc >= self.gait_osc_min
@@ -518,6 +590,9 @@ class PersonTracker(Node):
                 t.still_since_s = None
             kept.append(t)
         self.tracks = kept
+
+        if self.enroll_mode and not any(t.confirmed for t in self.tracks):
+            self.try_enroll(msg.header.stamp)
 
         # decision log: which gates each serious track passes/fails. This is
         # the ground truth for tuning false/missed person detections.

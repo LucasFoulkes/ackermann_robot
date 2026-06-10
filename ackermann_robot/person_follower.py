@@ -138,6 +138,24 @@ class PersonFollower(Node):
         out.pose.orientation.w = math.cos(gyaw / 2)
         return out
 
+    def clamp_into_bounds(self, ps):
+        if self.map_bounds is None:
+            return
+        try:
+            t = self.tf_buf.lookup_transform(self.goal_frame, "base_link",
+                                             rclpy.time.Time())
+        except Exception:
+            return
+        rx, ry = t.transform.translation.x, t.transform.translation.y
+        x0, y0, x1, y1 = self.map_bounds
+        gx, gy = ps.pose.position.x, ps.pose.position.y
+        for _ in range(25):
+            if x0 <= gx <= x1 and y0 <= gy <= y1:
+                break
+            gx = rx + (gx - rx) * 0.85
+            gy = ry + (gy - ry) * 0.85
+        ps.pose.position.x, ps.pose.position.y = gx, gy
+
     def status(self, text):
         self.pub_status.publish(String(data=text))
         self.get_logger().info(text)
@@ -226,6 +244,9 @@ class PersonFollower(Node):
             # so the BT GoalUpdater never holds an update older than the goal
             # (that mismatch made bt_navigator warn at tick rate)
             self.last_target.header.stamp = self.get_clock().now().to_msg()
+            # the rolling global costmap follows the robot: a goal stored
+            # in-bounds can be outside by now and Smac would fail it forever
+            self.clamp_into_bounds(self.last_target)
             self.pub_update.publish(self.last_target)
             self.last_update_s = self.now_s()
 
