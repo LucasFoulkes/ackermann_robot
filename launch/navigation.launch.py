@@ -205,7 +205,7 @@ def generate_launch_description():
         DeclareLaunchArgument("log_tf_health", default_value="false"),
         DeclareLaunchArgument("log_twist", default_value="false",
                               description="CSV: cmd vs odom twist + effort to ~/ros2_ws/logs"),
-        DeclareLaunchArgument("log_stuck", default_value="false",
+        DeclareLaunchArgument("log_stuck", default_value="true",
                               description="cmd vs odom stall detector -> /robot_stuck"),
         OpaqueFunction(function=_launch_setup),
     ])

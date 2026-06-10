@@ -157,6 +157,7 @@ local_costmap:
           max_obstacle_height: 2.0
           clearing: true
           marking: true
+          inf_is_valid: true   # sllidar no-return beams = free space, let them clear
           data_type: "LaserScan"
           # Ignore near-range returns (chassis/legs/cables in base_laser frame).
           raytrace_min_range: 0.22
@@ -168,6 +169,10 @@ local_costmap:
           max_obstacle_height: 0.20
           clearing: true
           marking: true
+          # depth_floor_scan publishes inf for clear beams; without this the
+          # obstacle layer DROPS those beams -> camera marks ghosts but never
+          # clears them (RPP "collision ahead" freezes on phantom obstacles).
+          inf_is_valid: true
           data_type: "LaserScan"
           # depth_floor_scan: floor -> robot top (~0.195 m); tighter range than lidar.
           raytrace_min_range: 0.15
