@@ -121,7 +121,8 @@ class PersonTracker(Node):
         self.max_speed = float(p("max_person_speed", 3.0))
         # static-map veto
         self.use_map_veto = bool(p("use_map_veto", True))
-        self.veto_occ = int(p("map_veto_occupancy", 50))
+        self.debug = bool(p("debug", True))
+        self.veto_occ = int(p("map_veto_occupancy", 65))
 
         self.fixed_frame = str(p("fixed_frame", "odom"))
         self.tracks = []
@@ -233,17 +234,13 @@ class PersonTracker(Node):
         return out
 
     def on_static_map(self, xy_map):
-        """True if this map-frame point lies on a mapped obstacle (3x3 cells)."""
+        """True if this map-frame point lies on a mapped obstacle (1 cell)."""
         m = self.map_msg
         res = m.info.resolution
         col = int((xy_map[0] - m.info.origin.position.x) / res)
         row = int((xy_map[1] - m.info.origin.position.y) / res)
-        for dr in (-1, 0, 1):
-            for dc in (-1, 0, 1):
-                r_, c_ = row + dr, col + dc
-                if 0 <= r_ < m.info.height and 0 <= c_ < m.info.width:
-                    if m.data[r_ * m.info.width + c_] >= self.veto_occ:
-                        return True
+        if 0 <= row < m.info.height and 0 <= col < m.info.width:
+            return m.data[row * m.info.width + col] >= self.veto_occ
         return False
 
     # --- main loop ---------------------------------------------------------
@@ -264,6 +261,7 @@ class PersonTracker(Node):
         # veto each leg/blob on the static map BEFORE pairing: edges of mapped
         # objects (walls, pots) otherwise pair across a small gap and the pair
         # midpoint sits in free space where a midpoint-veto cannot see it
+        n_legs_pre, n_blobs_pre = len(legs), len(blobs)
         if self.use_map_veto and self.map_msg is not None and (legs or blobs):
             tf_map = self.tf2d(self.map_msg.header.frame_id, self.fixed_frame,
                                msg.header.stamp)
@@ -274,6 +272,13 @@ class PersonTracker(Node):
                          if not self.on_static_map(bm)]
 
         cands, singles = self.pair_candidates(legs, blobs)
+        if self.debug:
+            self.get_logger().info(
+                f"legs {n_legs_pre}->{len(legs)} blobs {n_blobs_pre}->{len(blobs)} "
+                f"(map veto) | cands {len(cands)} singles {len(singles)} "
+                f"tracks {len(self.tracks)} "
+                f"confirmed {sum(1 for t in self.tracks if t.confirmed)}",
+                throttle_duration_sec=2.0)
 
         # predict, associate (greedy NN), update
         for t in self.tracks:

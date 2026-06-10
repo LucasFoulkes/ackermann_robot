@@ -15,14 +15,18 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     enabled = LaunchConfiguration("enabled", default="true")
+    map_veto = LaunchConfiguration("map_veto", default="true")
     return LaunchDescription([
         DeclareLaunchArgument("enabled", default_value=enabled,
                               description="start with following armed"),
+        DeclareLaunchArgument("map_veto", default_value=map_veto,
+                              description="reject candidates on mapped obstacles"),
         Node(
             package="ackermann_robot",
             executable="person_tracker",
             name="person_tracker",
             output="screen",
+            parameters=[{"use_map_veto": map_veto}],
         ),
         Node(
             package="ackermann_robot",
