@@ -170,6 +170,7 @@ class PersonTracker(Node):
         self.enroll_dist_max = float(p("enroll_dist_max", 2.5))
         self.enroll_half_angle = float(p("enroll_half_angle_rad", 0.5))
         self.enroll_min_hits = int(p("enroll_min_hits", 5))
+        self.enroll_min_travel = float(p("enroll_min_travel", 0.25))
         self.reid_window_s = float(p("reid_window_s", 3.0))
         self.reid_dist = float(p("reid_dist", 0.75))
         self.confirm_free_occ_max = float(p("confirm_free_occ_max", 10.0))
@@ -416,13 +417,16 @@ class PersonTracker(Node):
                 continue
             if abs(math.atan2(by, bx)) > self.enroll_half_angle:
                 continue
-            if not self.free_space_ok(t.xy, stamp):
-                continue   # on a mapped obstacle = wall edge, not a person
+            # walking into the cone is the enrollment signature: furniture
+            # tracks never displace; a standing person gets absorbed into the
+            # SLAM map (so a map check wrongly rejects them -- learned 17:38)
+            if t.travelled < self.enroll_min_travel:
+                continue
             if best is None or d < best_d:
                 best, best_d = t, d
         if best is None:
             self.get_logger().info(
-                f"no target: stand {self.enroll_dist_min:.1f}-"
+                f"no target: WALK into the zone {self.enroll_dist_min:.1f}-"
                 f"{self.enroll_dist_max:.1f} m in front of the robot to "
                 "enroll", throttle_duration_sec=10.0)
             return
