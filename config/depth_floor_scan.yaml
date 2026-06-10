@@ -20,7 +20,7 @@ depth_floor_scan:
     angle_max: 1.0
     angle_increment: 0.0075
     range_min: 0.15
-    range_max: 6.0
+    range_max: 2.8   # local costmap is rolling 4x4m, obstacle layer marks to ~2.5m — beams past that were discarded anyway, and D435i depth noise at >3m exceeds min_obstacle_height (ghosts)
     max_floor_tilt_deg: 20.0
     floor_height_min_m: 0.08
     floor_height_max_m: 0.22
