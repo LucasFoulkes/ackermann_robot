@@ -89,7 +89,7 @@ planner_server:
       # Keep this static while navigating. Live changes make Smac rebuild internal
       # heuristics and can stall the lifecycle heartbeat on the Pi.
       minimum_turning_radius: 1.1
-      reverse_penalty: 8.0
+      reverse_penalty: 1.5
       change_penalty: 0.0
       non_straight_penalty: 1.2
       cost_penalty: 2.0
