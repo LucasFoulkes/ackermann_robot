@@ -15,6 +15,8 @@ Safety: starts DISABLED. Enable with
 import math
 
 import rclpy
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import Twist
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
@@ -32,9 +34,13 @@ class PersonFollower(Node):
     def __init__(self):
         super().__init__("person_follower")
         p = lambda n, d: self.declare_parameter(n, d).value
-        self.bt_xml = str(p(
-            "behavior_tree",
-            "/opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/follow_point.xml"))
+        default_bt = get_package_share_directory("ackermann_robot") + \
+            "/behavior_trees/follow_person.xml"
+        self.bt_xml = str(p("behavior_tree", default_bt))
+        self.retreat_dist = float(p("retreat_dist", 0.40))
+        self.resume_dist = float(p("resume_dist", 0.70))
+        self.retreat_speed = float(p("retreat_speed", 0.13))
+        self.retreat_max_s = float(p("retreat_max_s", 4.0))
         self.lost_timeout_s = float(p("lost_timeout_s", 8.0))
         self.goal_frame = str(p("goal_frame", "map"))
         self.update_min_period_s = float(p("update_min_period_s", 0.3))
@@ -54,7 +60,9 @@ class PersonFollower(Node):
         self.pub_update = self.create_publisher(PoseStamped, "/goal_update", 10)
         self.pub_status = self.create_publisher(String, "/follow/status", 5)
         self.create_service(SetBool, "/follow/enable", self.on_enable)
-        self.create_timer(0.5, self.tick)
+        self.pub_cmd = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.retreating_since = None
+        self.create_timer(0.2, self.tick)
         self.get_logger().info(
             f"person_follower ready ({'ARMED' if self.enabled else 'DISABLED'}). "
             f"BT: {self.bt_xml}")
@@ -76,7 +84,7 @@ class PersonFollower(Node):
         yaw = yaw_of(t.transform.rotation)
         c, s = math.cos(yaw), math.sin(yaw)
         out = PoseStamped()
-        out.header.stamp = ps.header.stamp
+        out.header.stamp = self.get_clock().now().to_msg()
         out.header.frame_id = self.goal_frame
         x, y = ps.pose.position.x, ps.pose.position.y
         out.pose.position.x = tr.x + c * x - s * y
@@ -112,11 +120,42 @@ class PersonFollower(Node):
             self.pub_update.publish(goal_ps)
             self.last_update_s = self.now_s()
 
+    def target_distance(self):
+        if self.last_target is None:
+            return None
+        try:
+            t = self.tf_buf.lookup_transform(self.goal_frame, "base_link",
+                                             rclpy.time.Time())
+        except Exception:
+            return None
+        dx = self.last_target.pose.position.x - t.transform.translation.x
+        dy = self.last_target.pose.position.y - t.transform.translation.y
+        return math.hypot(dx, dy)
+
     def tick(self):
         if not self.enabled:
             return
         fresh = (self.last_target_s is not None
                  and self.now_s() - self.last_target_s < self.lost_timeout_s)
+        dist = self.target_distance() if fresh else None
+
+        # too close: cancel nav and back straight up until resume_dist
+        if self.retreating_since is not None:
+            if (not fresh or dist is None or dist >= self.resume_dist
+                    or self.now_s() - self.retreating_since > self.retreat_max_s):
+                self.retreating_since = None
+                self.pub_cmd.publish(Twist())  # stop
+                self.status("retreat done")
+            else:
+                cmd = Twist()
+                cmd.linear.x = -abs(self.retreat_speed)
+                self.pub_cmd.publish(cmd)
+            return
+        if fresh and dist is not None and dist < self.retreat_dist:
+            self.cancel_goal("person too close — retreating")
+            self.retreating_since = self.now_s()
+            return
+
         if self.goal_handle is None and not self.goal_pending and fresh:
             self.send_goal()
         elif self.goal_handle is not None and not fresh:
