@@ -48,6 +48,7 @@ setup(
             'imu_throttle = ackermann_robot.imu_throttle:main',
             'system_stats = ackermann_robot.system_stats:main',
             'scan_throttle = ackermann_robot.scan_throttle:main',
+            'scan_mask = ackermann_robot.scan_mask:main',
             'tf_health = ackermann_robot.tf_health:main',
             'twist_logger = ackermann_robot.twist_logger:main',
             'stuck_monitor = ackermann_robot.stuck_monitor:main',

@@ -189,7 +189,7 @@ local_costmap:
         footprint_clearing_enabled: true
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_nav   # person-masked (scan_mask node)
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -206,7 +206,7 @@ local_costmap:
         footprint_clearing_enabled: true
         observation_sources: camera_scan
         camera_scan:
-          topic: /camera/scan
+          topic: /camera/scan_nav   # person-masked (scan_mask node)
           max_obstacle_height: 0.20
           clearing: true
           marking: true
@@ -264,7 +264,7 @@ global_costmap:
         footprint_clearing_enabled: true
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_nav   # person-masked (scan_mask node)
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -280,7 +280,7 @@ global_costmap:
         footprint_clearing_enabled: true
         observation_sources: camera_scan
         camera_scan:
-          topic: /camera/scan
+          topic: /camera/scan_nav   # person-masked (scan_mask node)
           max_obstacle_height: 0.20
           clearing: true
           marking: true

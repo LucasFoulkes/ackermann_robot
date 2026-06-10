@@ -148,6 +148,7 @@ class PersonTracker(Node):
         self.sigma_obs = float(p("sigma_obs", 0.10))              # leg_tracker
         self.sigma_acc = float(p("sigma_acc", 1.0))               # m/s^2 walking
         self.gate_dist = float(p("association_gate", 0.35))
+        self.merge_dist = float(p("merge_dist", 0.45))
         self.confirm_travel = float(p("confirm_travel_m", 0.5))   # leg_tracker
         self.confirm_straightness = float(p("confirm_straightness", 0.6))
         self.confirm_speed_min = float(p("confirm_speed_min", 0.25))
@@ -513,7 +514,8 @@ class PersonTracker(Node):
                 break
             ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
             k = int(np.argmin(ds))
-            if ds[k] <= self.gate_dist + t.speed * dt:
+            gate = self.gate_dist * (2.0 if t.confirmed else 1.0)
+            if ds[k] <= gate + t.speed * dt:
                 t.update(cands[unmatched[k]], self.sigma_obs,
                          cand_seps[unmatched[k]])
                 t.last_seen_s = now_s
@@ -525,10 +527,35 @@ class PersonTracker(Node):
                 continue
             ds = [float(np.linalg.norm(singles[i] - t.xy)) for i in free_singles]
             k = int(np.argmin(ds))
-            if ds[k] <= self.gate_dist + t.speed * dt:
+            gate = self.gate_dist * (2.0 if t.confirmed else 1.0)
+            if ds[k] <= gate + t.speed * dt:
                 t.update(singles[free_singles[k]], self.sigma_obs)
                 t.last_seen_s = now_s
                 free_singles.pop(k)
+        # merge duplicates: a fresh track that forms on top of a confirmed
+        # person steals their updates and the confirmed track starves (seen
+        # as the enrolled id coasting while a new id rides the person)
+        confirmed = [t for t in self.tracks if t.confirmed]
+        if confirmed:
+            merged = []
+            for t in self.tracks:
+                if t.confirmed:
+                    merged.append(t)
+                    continue
+                near = min(confirmed,
+                           key=lambda c: float(np.linalg.norm(c.xy - t.xy)))
+                if float(np.linalg.norm(near.xy - t.xy)) <= self.merge_dist:
+                    if t.last_seen_s >= near.last_seen_s:  # take fresher fix
+                        near.x[:2] = t.x[:2]
+                        near.x[2:] = 0.7 * near.x[2:] + 0.3 * t.x[2:]
+                        near.P = np.diag([self.sigma_obs**2, self.sigma_obs**2,
+                                          near.P[2, 2], near.P[3, 3]])
+                        near.last_seen_s = t.last_seen_s
+                    near.hits += t.hits
+                    continue
+                merged.append(t)
+            self.tracks = merged
+
         # coasting tracks: damp velocity so the marker cannot glide away
         for t in self.tracks:
             if t.last_seen_s != now_s:

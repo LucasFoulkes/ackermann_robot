@@ -61,6 +61,14 @@ def generate_launch_description():
             output="screen",
             condition=IfCondition(log_csv),
         ),
+        # republishes /scan + /camera/scan with the followed person's beams
+        # NaN'd out so the costmaps never see them as an obstacle
+        Node(
+            package="ackermann_robot",
+            executable="scan_mask",
+            name="scan_mask",
+            output="screen",
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(nav_launch),
             launch_arguments={
