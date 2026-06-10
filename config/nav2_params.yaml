@@ -145,13 +145,16 @@ local_costmap:
       # Narrower sides (±0.095): when parked parallel to a wall the long edge was
       # clipping inflation even with ~1 cm physical gap (see RViz along-wall stalls).
       footprint: "[[-0.075, -0.095], [-0.075, 0.095], [0.323, 0.095], [0.323, -0.095]]"
-      plugins: ["obstacle_layer", "inflation_layer"]
-      obstacle_layer:
+      plugins: ["lidar_layer", "camera_layer", "inflation_layer"]
+      # Lidar and camera in SEPARATE layers: sharing one layer lets lidar beams
+      # that pass OVER a low obstacle raytrace-erase the camera's marks (the
+      # lidar can't see below its plane). Layers combine by max; each sensor
+      # now clears only its own observations.
+      lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
         footprint_clearing_enabled: true
-        # Lidar + optional D435i floor-free scan (use_floor_scan:=true in drive.launch).
-        observation_sources: scan camera_scan
+        observation_sources: scan
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -164,6 +167,11 @@ local_costmap:
           raytrace_max_range: 10.0
           obstacle_min_range: 0.22
           obstacle_max_range: 8.0
+      camera_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: true
+        observation_sources: camera_scan
         camera_scan:
           topic: /camera/scan
           max_obstacle_height: 0.20
@@ -201,12 +209,48 @@ global_costmap:
       footprint: "[[-0.075, -0.095], [-0.075, 0.095], [0.323, 0.095], [0.323, -0.095]]"
       resolution: 0.05
       track_unknown_space: true
-      # Static SLAM map only — live /scan in map frame stalled planner (TF into the past).
-      plugins: ["static_layer", "inflation_layer"]
+      # Static SLAM map + LIVE obstacle layers: without them the planner only
+      # sees the SLAM map, plans straight through fresh obstacles, and RPP
+      # collision-ahead + recoveries loop forever on the same blocked path.
+      # (The old "TF into the past" planner stall dates from the 99%-CPU era;
+      # TF is healthy since the 2026-06-09 perf overhaul.)
+      plugins: ["static_layer", "lidar_layer", "camera_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
         trinary_costmap: true
+      lidar_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          inf_is_valid: true
+          data_type: "LaserScan"
+          raytrace_min_range: 0.22
+          raytrace_max_range: 10.0
+          obstacle_min_range: 0.22
+          obstacle_max_range: 8.0
+      camera_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: true
+        observation_sources: camera_scan
+        camera_scan:
+          topic: /camera/scan
+          max_obstacle_height: 0.20
+          clearing: true
+          marking: true
+          inf_is_valid: true
+          obstacle_max_range: 1.9   # below scan range_max 2.0 (phantom-ring guard)
+          data_type: "LaserScan"
+          raytrace_min_range: 0.15
+          raytrace_max_range: 2.2
+          obstacle_min_range: 0.15
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Gentle gradient (NOT 40): Smac needs the inflation cost to extend out to the
