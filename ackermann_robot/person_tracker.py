@@ -202,6 +202,7 @@ class PersonTracker(Node):
         self.create_subscription(OccupancyGrid, "/map", self.on_map, map_qos)
 
         self.create_service(Trigger, "/follow/enroll", self.on_enroll_srv)
+        self.create_timer(5.0, self.check_duplicates)
         self.pub_markers = self.create_publisher(MarkerArray, "/people", 5)
         self.pub_poses = self.create_publisher(PoseArray, "/people_poses", 5)
         self.pub_target = self.create_publisher(PoseStamped, "/person_target", 5)
@@ -415,6 +416,8 @@ class PersonTracker(Node):
                 continue
             if abs(math.atan2(by, bx)) > self.enroll_half_angle:
                 continue
+            if not self.free_space_ok(t.xy, stamp):
+                continue   # on a mapped obstacle = wall edge, not a person
             if best is None or d < best_d:
                 best, best_d = t, d
         if best is None:
@@ -428,6 +431,17 @@ class PersonTracker(Node):
         self.get_logger().info(
             f"ENROLLED person {best.id} at {best_d:.2f} m in front -- "
             "following")
+
+    def check_duplicates(self):
+        try:
+            n = self.get_node_names().count("person_tracker")
+        except Exception:
+            return
+        if n > 1:
+            self.get_logger().error(
+                f"{n} person_tracker nodes running! Orphans from old launches "
+                "publish conflicting /person_target -- kill the extras "
+                "(pgrep -af person_tracker).")
 
     def on_enroll_srv(self, req, res):
         for t in self.tracks:

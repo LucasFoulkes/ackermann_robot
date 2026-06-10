@@ -28,6 +28,7 @@ class FollowClient(Node):
         self.goal_pending = False
         self.next_send_s = 0.0
         self.last_state = -1
+        self.last_state_log_s = 0.0
 
         self.client = ActionClient(self, FollowObject, "follow_object")
         self.create_subscription(PoseStamped, self.pose_topic,
@@ -91,9 +92,10 @@ class FollowClient(Node):
 
     def on_fb(self, fb):
         st = fb.feedback.state
-        if st != self.last_state:
+        if st != self.last_state and self.now_s() - self.last_state_log_s > 1.0:
             self.get_logger().info(f"follow state: {STATES.get(st, st)}")
             self.last_state = st
+            self.last_state_log_s = self.now_s()
 
     def on_result(self, fut):
         self.goal_handle = None
