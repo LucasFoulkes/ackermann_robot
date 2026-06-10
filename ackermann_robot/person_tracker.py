@@ -148,7 +148,9 @@ class PersonTracker(Node):
         self.sigma_obs = float(p("sigma_obs", 0.15))              # leg_tracker
         self.sigma_acc = float(p("sigma_acc", 0.6))               # m/s^2 walking
         self.gate_dist = float(p("association_gate", 0.35))
-        self.merge_dist = float(p("merge_dist", 0.45))
+        self.merge_dist = float(p("merge_dist", 0.35))
+        self.target_pub_max_unseen_s = float(p("target_pub_max_unseen_s", 0.6))
+        self.min_range = float(p("min_range", 0.30))
         self.confirm_travel = float(p("confirm_travel_m", 0.5))   # leg_tracker
         self.confirm_straightness = float(p("confirm_straightness", 0.6))
         self.confirm_speed_min = float(p("confirm_speed_min", 0.25))
@@ -221,7 +223,8 @@ class PersonTracker(Node):
         r = np.asarray(msg.ranges, dtype=np.float32)
         n = len(r)
         ang = msg.angle_min + msg.angle_increment * np.arange(n)
-        valid = np.isfinite(r) & (r >= msg.range_min) & (r <= self.max_range)
+        valid = (np.isfinite(r) & (r >= max(msg.range_min, self.min_range))
+                 & (r <= self.max_range))
         idx = np.where(valid)[0]
         if len(idx) < self.min_points:
             return []
@@ -517,8 +520,9 @@ class PersonTracker(Node):
                 break
             ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
             k = int(np.argmin(ds))
-            gate = self.gate_dist * (2.0 if t.confirmed else 1.0)
-            if ds[k] <= gate + min(t.speed, 1.2) * dt:
+            gate = (self.gate_dist + 1.5 * dt if t.confirmed
+                    else self.gate_dist + min(t.speed, 1.2) * dt)
+            if ds[k] <= gate:
                 t.update(cands[unmatched[k]], self.sigma_obs,
                          cand_seps[unmatched[k]])
                 t.last_seen_s = now_s
@@ -530,8 +534,9 @@ class PersonTracker(Node):
                 continue
             ds = [float(np.linalg.norm(singles[i] - t.xy)) for i in free_singles]
             k = int(np.argmin(ds))
-            gate = self.gate_dist * (2.0 if t.confirmed else 1.0)
-            if ds[k] <= gate + min(t.speed, 1.2) * dt:
+            gate = (self.gate_dist + 1.5 * dt if t.confirmed
+                    else self.gate_dist + min(t.speed, 1.2) * dt)
+            if ds[k] <= gate:
                 t.update(singles[free_singles[k]], self.sigma_obs)
                 t.last_seen_s = now_s
                 free_singles.pop(k)
@@ -539,7 +544,7 @@ class PersonTracker(Node):
         for t in self.tracks:
             if not t.confirmed or t.last_seen_s == now_s:
                 continue
-            gate = self.gate_dist * 2.0 + min(t.speed, 1.2) * dt
+            gate = self.gate_dist + 1.5 * dt
             dc = min((float(np.linalg.norm(c - t.xy)) for c in cands_all),
                      default=float("inf"))
             ds_ = min((float(np.linalg.norm(s - t.xy)) for s in singles_all),
@@ -661,6 +666,7 @@ class PersonTracker(Node):
     # --- output ------------------------------------------------------------
 
     def publish(self, stamp):
+        stamp_s = stamp.sec + stamp.nanosec * 1e-9
         people = [t for t in self.tracks if t.confirmed]
 
         pa = PoseArray()
@@ -694,7 +700,8 @@ class PersonTracker(Node):
                 import colorsys
                 hue = (t.id * 0.618) % 1.0                # distinct per id
                 m.color.r, m.color.g, m.color.b = colorsys.hsv_to_rgb(hue, 0.9, 0.95)
-            m.color.a = 0.8
+            # transparent = coasting on no data (ghost), solid = seen now
+            m.color.a = 0.8 if stamp_s - t.last_seen_s <= 0.3 else 0.25
             ma.markers.append(m)
             txt = Marker()
             txt.header = m.header
@@ -710,7 +717,7 @@ class PersonTracker(Node):
 
         # target choice: sticky, but prefer moving people. Defect from a
         # target that has stood still > still_defect_s when another is moving.
-        now_s = stamp.sec + stamp.nanosec * 1e-9
+        now_s = stamp_s
         cur = next((t for t in people if t.id == self.target_id), None)
         moving = [t for t in people if t.speed >= 0.25]
         bx = by = None
@@ -735,7 +742,8 @@ class PersonTracker(Node):
                     f"target -> person {new_id} (dist {dist(target):.2f} m, "
                     f"speed {target.speed:.2f} m/s)")
         self.target_id = new_id
-        if target is not None:
+        if (target is not None
+                and now_s - target.last_seen_s <= self.target_pub_max_unseen_s):
             ps = PoseStamped()
             ps.header.stamp = stamp
             ps.header.frame_id = self.fixed_frame
