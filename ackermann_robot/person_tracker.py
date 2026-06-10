@@ -48,6 +48,7 @@ class Track:
         self.last_seen_s = now_s
         self.confirmed = False
         self.hits = 1
+        self.still_since_s = None
 
     def predict(self, dt, sigma_acc):
         F = np.eye(4)
@@ -114,6 +115,7 @@ class PersonTracker(Node):
         self.confirm_travel = float(p("confirm_travel_m", 0.5))   # leg_tracker
         self.confirm_straightness = float(p("confirm_straightness", 0.6))
         self.confirm_speed_min = float(p("confirm_speed_min", 0.25))
+        self.still_defect_s = float(p("still_defect_s", 5.0))
         self.drop_after_s = float(p("drop_after_s", 1.5))
         self.drop_confirmed_after_s = float(p("drop_confirmed_after_s", 3.0))
         self.max_speed = float(p("max_person_speed", 3.0))
@@ -252,21 +254,26 @@ class PersonTracker(Node):
         self.last_scan_s = now_s
 
         legs, blobs = self.leg_candidates(self.clusters_from_scan(msg))
-        cands_laser, singles_laser = self.pair_candidates(legs, blobs)
 
         tf_fix = self.tf2d(self.fixed_frame, msg.header.frame_id, msg.header.stamp)
         if tf_fix is None:
             return  # no odom TF yet
-        cands = self.apply2d(tf_fix, cands_laser)
-        singles = self.apply2d(tf_fix, singles_laser)
+        legs = self.apply2d(tf_fix, legs)
+        blobs = self.apply2d(tf_fix, blobs)
 
-        if self.use_map_veto and self.map_msg is not None and cands:
+        # veto each leg/blob on the static map BEFORE pairing: edges of mapped
+        # objects (walls, pots) otherwise pair across a small gap and the pair
+        # midpoint sits in free space where a midpoint-veto cannot see it
+        if self.use_map_veto and self.map_msg is not None and (legs or blobs):
             tf_map = self.tf2d(self.map_msg.header.frame_id, self.fixed_frame,
                                msg.header.stamp)
             if tf_map is not None:
-                cands_map = self.apply2d(tf_map, cands)
-                cands = [c for c, cm in zip(cands, cands_map)
-                         if not self.on_static_map(cm)]
+                legs = [l for l, lm in zip(legs, self.apply2d(tf_map, legs))
+                        if not self.on_static_map(lm)]
+                blobs = [b for b, bm in zip(blobs, self.apply2d(tf_map, blobs))
+                         if not self.on_static_map(bm)]
+
+        cands, singles = self.pair_candidates(legs, blobs)
 
         # predict, associate (greedy NN), update
         for t in self.tracks:
@@ -314,6 +321,11 @@ class PersonTracker(Node):
                 self.get_logger().info(
                     f"person {t.id} confirmed (travelled {t.travelled:.2f} m, "
                     f"straightness {t.straightness:.2f}, {t.speed:.2f} m/s)")
+            if t.speed < 0.25:
+                if t.still_since_s is None:
+                    t.still_since_s = now_s
+            else:
+                t.still_since_s = None
             kept.append(t)
         self.tracks = kept
 
@@ -347,7 +359,13 @@ class PersonTracker(Node):
             m.pose.position.z = 0.6
             m.scale.x = m.scale.y = 0.3
             m.scale.z = 1.2
-            m.color.g, m.color.a = 1.0, 0.8
+            if t.speed < 0.25:
+                m.color.r = m.color.g = m.color.b = 0.5   # standing = gray
+            else:
+                import colorsys
+                hue = (t.id * 0.618) % 1.0                # distinct per id
+                m.color.r, m.color.g, m.color.b = colorsys.hsv_to_rgb(hue, 0.9, 0.95)
+            m.color.a = 0.8
             ma.markers.append(m)
             txt = Marker()
             txt.header = m.header
@@ -361,14 +379,24 @@ class PersonTracker(Node):
         self.pub_poses.publish(pa)
         self.pub_markers.publish(ma)
 
-        # sticky target: keep same id while alive, else nearest confirmed to robot
-        target = next((t for t in people if t.id == self.target_id), None)
-        if target is None and people:
-            tf_base = self.tf2d(self.fixed_frame, "base_link", stamp)
-            if tf_base is not None:
-                bx, by = tf_base[0], tf_base[1]
-                target = min(people,
-                             key=lambda t: np.hypot(t.xy[0] - bx, t.xy[1] - by))
+        # target choice: sticky, but prefer moving people. Defect from a
+        # target that has stood still > still_defect_s when another is moving.
+        now_s = stamp.sec + stamp.nanosec * 1e-9
+        cur = next((t for t in people if t.id == self.target_id), None)
+        moving = [t for t in people if t.speed >= 0.25]
+        bx = by = None
+        tf_base = self.tf2d(self.fixed_frame, "base_link", stamp)
+        if tf_base is not None:
+            bx, by = tf_base[0], tf_base[1]
+        dist = (lambda t: np.hypot(t.xy[0] - bx, t.xy[1] - by)) if bx is not None             else (lambda t: 0.0)
+        target = cur
+        cur_idle = (cur is not None and cur.still_since_s is not None
+                    and now_s - cur.still_since_s > self.still_defect_s)
+        others_moving = [t for t in moving if cur is None or t.id != cur.id]
+        if (cur is None or cur_idle) and others_moving:
+            target = min(others_moving, key=dist)
+        elif cur is None and people:
+            target = min(people, key=dist)
         self.target_id = target.id if target is not None else None
         if target is not None:
             ps = PoseStamped()
