@@ -152,7 +152,9 @@ class PersonTracker(Node):
         self.still_defect_s = float(p("still_defect_s", 5.0))
         self.drop_after_s = float(p("drop_after_s", 1.5))
         self.drop_confirmed_after_s = float(p("drop_confirmed_after_s", 6.0))
-        self.drop_pos_std = float(p("drop_pos_std", 1.0))
+        self.drop_pos_std = float(p("drop_pos_std", 2.0))
+        self.confirm_robot_lin_max = float(p("confirm_robot_lin_max", 0.08))
+        self.confirm_robot_ang_max = float(p("confirm_robot_ang_max", 0.15))
         self.reid_window_s = float(p("reid_window_s", 3.0))
         self.reid_dist = float(p("reid_dist", 0.75))
         self.confirm_free_occ_max = float(p("confirm_free_occ_max", 10.0))
@@ -169,6 +171,9 @@ class PersonTracker(Node):
         self.map_msg = None
         self.last_scan_s = None
         self.last_gate_log_s = 0.0
+        self.robot_pose_prev = None      # (x, y, yaw, t) for self-motion
+        self.robot_lin = 0.0
+        self.robot_ang = 0.0
 
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
@@ -329,6 +334,10 @@ class PersonTracker(Node):
             ("speed", self.confirm_speed_min <= t.speed <= self.max_speed,
              f"spd {t.speed:.2f}"),
             ("freespace", self.free_space_ok(t.xy, stamp), "occ"),
+            ("robotstill",
+             self.robot_lin <= self.confirm_robot_lin_max
+             and abs(self.robot_ang) <= self.confirm_robot_ang_max,
+             f"bot {self.robot_lin:.2f}/{self.robot_ang:.2f}"),
         ]
         fails = [name for name, passed, _ in checks if not passed]
         detail = " ".join(d for _, _, d in checks)
@@ -346,6 +355,23 @@ class PersonTracker(Node):
         tf_fix = self.tf2d(self.fixed_frame, msg.header.frame_id, msg.header.stamp)
         if tf_fix is None:
             return  # no odom TF yet
+
+        # robot self-motion: every phantom confirm in field runs happened
+        # while the robot was driving (occlusion edges sweep through free
+        # space with walking-like motion). Track it to gate confirmation.
+        tf_b = self.tf2d(self.fixed_frame, "base_link", msg.header.stamp)
+        if tf_b is not None:
+            bx, by, byaw = tf_b[0], tf_b[1], math.atan2(tf_b[3], tf_b[2])
+            if self.robot_pose_prev is not None:
+                px, py, pyaw, pt = self.robot_pose_prev
+                rdt = max(0.02, now_s - pt)
+                dyaw = math.atan2(math.sin(byaw - pyaw), math.cos(byaw - pyaw))
+                # low-pass: TF jitter must not look like motion
+                self.robot_lin = (0.6 * self.robot_lin
+                                  + 0.4 * math.hypot(bx - px, by - py) / rdt)
+                self.robot_ang = (0.6 * self.robot_ang
+                                  + 0.4 * abs(dyaw) / rdt)
+            self.robot_pose_prev = (bx, by, byaw, now_s)
         legs = self.apply2d(tf_fix, legs)
         blobs = self.apply2d(tf_fix, blobs)
 
@@ -447,7 +473,9 @@ class PersonTracker(Node):
                     and t.gait_osc >= self.gait_osc_min
                     and t.gait_alternations >= 2
                     and self.confirm_speed_min <= t.speed <= self.max_speed
-                    and self.free_space_ok(t.xy, msg.header.stamp)):
+                    and self.free_space_ok(t.xy, msg.header.stamp)
+                    and self.robot_lin <= self.confirm_robot_lin_max
+                    and abs(self.robot_ang) <= self.confirm_robot_ang_max):
                 t.confirmed = True
                 self.get_logger().info(
                     f"person {t.id} confirmed at ({t.xy[0]:.2f}, {t.xy[1]:.2f}) "

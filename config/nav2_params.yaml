@@ -109,11 +109,13 @@ planner_server:
       # The 0.1 m rolling window is already 4x fewer cells than the old map.
       downsample_costmap: false
       max_iterations: 200000
-      max_planning_time: 0.5
+      # 0.5 was too tight: ~1 m lateral goals need multi-point Reeds-Shepp
+      # maneuvers (R_min 1.1 m) and timed out as "no valid path found".
+      max_planning_time: 1.0
       motion_model_for_search: "REEDS_SHEPP"   # Ackermann with reverse, no spin-in-place
-      # 32 bins (11 deg) matches the downsampled 0.2 m grid: at R=1.1 m one
-      # bin of heading change ~ one cell of travel. 72 wasted expansions.
-      angle_quantization_bins: 32
+      # 32 bins broke analytic expansion for short maneuver goals (paired
+      # with the 0.5 s budget -> "no valid path found"). 64 is the win vs 72.
+      angle_quantization_bins: 64
       # Physical full lock = curvature ~1.2 1/m (R~0.83 m), set in cmd_vel_to_effort.
       # Plan wider than that: R = 1.1 m leaves headroom — RPP path corrections often
       # demand tighter turns than the path itself when the robot is off-track.
