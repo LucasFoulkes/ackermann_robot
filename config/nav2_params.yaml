@@ -129,7 +129,7 @@ local_costmap:
   local_costmap:
     ros__parameters:
       update_frequency: 5.0
-      publish_frequency: 2.0
+      publish_frequency: 5.0   # 2 Hz made the rolling window visibly trail the robot in RViz
       global_frame: odom
       robot_base_frame: base_link
       transform_tolerance: 2.5
@@ -173,10 +173,14 @@ local_costmap:
           # obstacle layer DROPS those beams -> camera marks ghosts but never
           # clears them (RPP "collision ahead" freezes on phantom obstacles).
           inf_is_valid: true
+          # inf beams become "return at range_max (2.0)" — obstacle_max_range
+          # must sit BELOW that or every clear beam marks a phantom ring at
+          # exactly 2.0 m around the robot. 1.9: real returns mark, inf clears.
+          obstacle_max_range: 1.9
           data_type: "LaserScan"
           # depth_floor_scan: floor -> robot top (~0.195 m); tighter range than lidar.
           raytrace_min_range: 0.15
-          raytrace_max_range: 6.0
+          raytrace_max_range: 2.2
           obstacle_min_range: 0.15
           obstacle_max_range: 5.0
       inflation_layer:
