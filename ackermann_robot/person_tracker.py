@@ -17,6 +17,7 @@ Outputs:
                  sticky to the same track id while it survives)
 """
 import math
+import os
 
 import numpy as np
 import rclpy
@@ -29,6 +30,9 @@ from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
+
+from ament_index_python.packages import get_package_share_directory
+from ackermann_robot.leg_classifier import LegClassifier
 
 
 def yaw_of(q):
@@ -50,6 +54,7 @@ class Track:
         self.confirmed = False
         self.hits = 1
         self.still_since_s = None
+        self.leg_conf = 0.5              # EWMA of classifier P(leg)
         self.sep_hist = []               # observed leg separation / blob width
 
     def predict(self, dt, sigma_acc):
@@ -67,7 +72,7 @@ class Track:
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
 
-    def update(self, xy, sigma_obs, sep=None):
+    def update(self, xy, sigma_obs, sep=None, conf=None):
         H = np.array([[1.0, 0, 0, 0], [0, 1.0, 0, 0]])
         R = np.eye(2) * sigma_obs**2
         y = np.asarray(xy) - H @ self.x
@@ -82,6 +87,8 @@ class Track:
             self.sep_hist.append(float(sep))
             if len(self.sep_hist) > 40:
                 self.sep_hist.pop(0)
+        if conf is not None:
+            self.leg_conf = 0.9 * self.leg_conf + 0.1 * float(conf)
 
     @property
     def xy(self):
@@ -171,6 +178,12 @@ class PersonTracker(Node):
         self.enroll_half_angle = float(p("enroll_half_angle_rad", 0.5))
         self.enroll_min_hits = int(p("enroll_min_hits", 5))
         self.enroll_min_travel = float(p("enroll_min_travel", 0.25))
+        self.leg_conf_create_min = float(p("leg_conf_create_min", 0.15))
+        self.leg_conf_enroll_min = float(p("leg_conf_enroll_min", 0.35))
+        default_forest = os.path.join(
+            get_package_share_directory("ackermann_robot"), "config",
+            "trained_leg_detector_res=0.33.yaml")
+        self.clf = LegClassifier(str(p("leg_forest_file", default_forest)))
         self.reid_window_s = float(p("reid_window_s", 3.0))
         self.reid_dist = float(p("reid_dist", 0.75))
         self.confirm_free_occ_max = float(p("confirm_free_occ_max", 10.0))
@@ -214,7 +227,8 @@ class PersonTracker(Node):
                f"{self.enroll_dist_max} m in front to be followed)"
                if self.enroll_mode else
                f"auto-confirm after {self.confirm_travel} m of travel")
-            + f", map veto {'on' if self.use_map_veto else 'off'}")
+            + f", map veto {'on' if self.use_map_veto else 'off'}, leg "
+            f"classifier {'LOADED' if self.clf.ok else 'MISSING (neutral 0.5)'}")
 
     def on_map(self, msg):
         self.map_msg = msg
@@ -245,9 +259,16 @@ class PersonTracker(Node):
         for part in parts:
             if len(part) < self.min_points:
                 continue
+            p_ = pts[part]
+            width = float(np.linalg.norm(p_[0] - p_[-1]))
+            # classifier P(leg): only score leg/blob-width clusters (walls
+            # are dropped by the width gate anyway; saves ~0.8 ms each)
+            conf = (self.clf.score(p_, idx[part], r, msg.range_min,
+                                   msg.range_max)
+                    if width <= self.blob_w_max else 0.0)
             # foreground flag gates track CREATION only -- a person's legs
             # brushing past furniture must still UPDATE their track
-            out.append((pts[part], self.foreground_ok(r, idx, part)))
+            out.append((p_, self.foreground_ok(r, idx, part), conf))
         return out
 
     def foreground_ok(self, r, idx, part):
@@ -272,24 +293,28 @@ class PersonTracker(Node):
     def leg_candidates(self, clusters):
         legs, blobs, blob_w = [], [], []
         leg_fg, blob_fg = [], []
-        for c, fg in clusters:
+        leg_cf, blob_cf = [], []
+        for c, fg, conf in clusters:
             width = float(np.linalg.norm(c[0] - c[-1]))
             centroid = c.mean(axis=0)
             if self.leg_w_min <= width <= self.leg_w_max:
                 legs.append(centroid)
                 leg_fg.append(fg)
+                leg_cf.append(conf)
             elif self.leg_w_max < width <= self.blob_w_max:
                 blobs.append(centroid)   # possibly two legs close together
                 blob_fg.append(fg)
+                blob_cf.append(conf)
                 blob_w.append(width)
-        return legs, leg_fg, blobs, blob_fg, blob_w
+        return legs, leg_fg, leg_cf, blobs, blob_fg, blob_cf, blob_w
 
-    def pair_candidates(self, legs, leg_fg, blobs, blob_fg, blob_w):
+    def pair_candidates(self, legs, leg_fg, leg_cf, blobs, blob_fg, blob_cf,
+                        blob_w):
         """Person candidates (pair midpoints + merged-legs blobs) and the
         leftover single legs. Singles can UPDATE an existing track (feet
         apart / one leg occluded) but never create one — keeps clutter out
         while stopping track dropouts that made the marker coast away."""
-        cands, seps, cand_fg = [], [], []
+        cands, seps, cand_fg, cand_cf = [], [], [], []
         used = set()
         for i in range(len(legs)):
             if i in used:
@@ -307,11 +332,14 @@ class PersonTracker(Node):
                 cands.append((legs[i] + legs[best_j]) / 2.0)
                 seps.append(best_d)
                 cand_fg.append(leg_fg[i] and leg_fg[best_j])
+                cand_cf.append(0.5 * (leg_cf[i] + leg_cf[best_j]))
         cands.extend(blobs)
         seps.extend(blob_w)
         cand_fg.extend(blob_fg)
+        cand_cf.extend(blob_cf)
         singles = [legs[i] for i in range(len(legs)) if i not in used]
-        return cands, seps, cand_fg, singles
+        singles_cf = [leg_cf[i] for i in range(len(legs)) if i not in used]
+        return cands, seps, cand_fg, cand_cf, singles, singles_cf
 
     # --- frames / map veto -------------------------------------------------
 
@@ -388,6 +416,8 @@ class PersonTracker(Node):
             ("speed", self.confirm_speed_min <= t.speed <= self.max_speed,
              f"spd {t.speed:.2f}"),
             ("freespace", self.free_space_ok(t.xy, stamp), "occ"),
+            ("legconf", t.leg_conf >= self.leg_conf_enroll_min,
+             f"conf {t.leg_conf:.2f}"),
             ("robotstill",
              self.robot_lin <= self.confirm_robot_lin_max
              and abs(self.robot_ang) <= self.confirm_robot_ang_max,
@@ -422,6 +452,8 @@ class PersonTracker(Node):
             # SLAM map (so a map check wrongly rejects them -- learned 17:38)
             if t.travelled < self.enroll_min_travel:
                 continue
+            if t.leg_conf < self.leg_conf_enroll_min:
+                continue   # walked, but doesn't look like legs to the forest
             if best is None or d < best_d:
                 best, best_d = t, d
         if best is None:
@@ -433,8 +465,8 @@ class PersonTracker(Node):
         best.confirmed = True
         self.target_id = best.id
         self.get_logger().info(
-            f"ENROLLED person {best.id} at {best_d:.2f} m in front -- "
-            "following")
+            f"ENROLLED person {best.id} at {best_d:.2f} m in front "
+            f"(leg conf {best.leg_conf:.2f}) -- following")
 
     def check_duplicates(self):
         try:
@@ -465,7 +497,7 @@ class PersonTracker(Node):
         dt = 0.1 if self.last_scan_s is None else max(0.01, min(0.5, now_s - self.last_scan_s))
         self.last_scan_s = now_s
 
-        (legs, leg_fg, blobs, blob_fg,
+        (legs, leg_fg, leg_cf, blobs, blob_fg, blob_cf,
          blob_w) = self.leg_candidates(self.clusters_from_scan(msg))
 
         tf_fix = self.tf2d(self.fixed_frame, msg.header.frame_id, msg.header.stamp)
@@ -511,12 +543,15 @@ class PersonTracker(Node):
                           + [b for b, k in zip(blobs, keep_b) if not k])
                 leg_fg = [f for f, k in zip(leg_fg, keep_l) if k]
                 blob_fg = [f for f, k in zip(blob_fg, keep_b) if k]
+                leg_cf = [f for f, k in zip(leg_cf, keep_l) if k]
+                blob_cf = [f for f, k in zip(blob_cf, keep_b) if k]
                 legs = [l for l, k in zip(legs, keep_l) if k]
                 blobs = [b for b, k in zip(blobs, keep_b) if k]
                 blob_w = [w for w, k in zip(blob_w, keep_b) if k]
 
-        cands, cand_seps, cand_fg, singles = self.pair_candidates(
-            legs, leg_fg, blobs, blob_fg, blob_w)
+        cands, cand_seps, cand_fg, cand_cf, singles, singles_cf = \
+            self.pair_candidates(legs, leg_fg, leg_cf, blobs, blob_fg,
+                                 blob_cf, blob_w)
         singles = singles + vetoed
         if self.debug:
             self.get_logger().info(
@@ -542,7 +577,7 @@ class PersonTracker(Node):
                     else self.gate_dist + min(t.speed, 1.2) * dt)
             if ds[k] <= gate:
                 t.update(cands[unmatched[k]], self.sigma_obs,
-                         cand_seps[unmatched[k]])
+                         cand_seps[unmatched[k]], cand_cf[unmatched[k]])
                 t.last_seen_s = now_s
                 unmatched.pop(k)
         # second pass: lone legs may update tracks that got no pair this scan
@@ -555,7 +590,8 @@ class PersonTracker(Node):
             gate = (self.gate_dist + 1.5 * dt if t.confirmed
                     else self.gate_dist + min(t.speed, 1.2) * dt)
             if ds[k] <= gate:
-                t.update(singles[free_singles[k]], self.sigma_obs)
+                t.update(singles[free_singles[k]], self.sigma_obs,
+                         conf=singles_cf[free_singles[k]])
                 t.last_seen_s = now_s
                 free_singles.pop(k)
         # the single most important diagnostic: WHY did the target miss
@@ -606,7 +642,10 @@ class PersonTracker(Node):
         for i in unmatched:
             if not cand_fg[i]:
                 continue   # occluded-edge clusters may update, never create
+            if cand_cf[i] < self.leg_conf_create_min:
+                continue   # classifier says "not legs" -- no track
             t = Track(cands[i], now_s, self.sigma_obs)
+            t.leg_conf = cand_cf[i]
             # re-id: a confirmed person who briefly vanished (occlusion, scan
             # dropout) comes back as the same id, already confirmed
             for k, (pid, xy, ts) in enumerate(self.dead_people):
@@ -728,7 +767,7 @@ class PersonTracker(Node):
             txt.pose.position.z = 1.4
             txt.scale.z = 0.25
             txt.color.r = txt.color.g = txt.color.b = txt.color.a = 1.0
-            txt.text = f"id {t.id}  {t.speed:.1f} m/s"
+            txt.text = f"id {t.id}  {t.speed:.1f} m/s  p{t.leg_conf:.2f}"
             ma.markers.append(txt)
         self.pub_poses.publish(pa)
         self.pub_markers.publish(ma)
