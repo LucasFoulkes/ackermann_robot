@@ -76,7 +76,7 @@ class DepthFloorScan(Node):
         self.min_inliers = int(p("min_floor_inliers", 600))
         self.floor_seed_min_y = float(p("floor_seed_min_y", 0.05))
         self.floor_seed_min_z = float(p("floor_seed_min_z", 0.20))
-        self.min_h = float(p("min_obstacle_height", 0.02))
+        self.min_h = float(p("min_obstacle_height", 0.06))
         self.max_h = float(p("max_obstacle_height", 0.195))
         self.angle_min = float(p("angle_min", -1.0))
         self.angle_max = float(p("angle_max", 1.0))

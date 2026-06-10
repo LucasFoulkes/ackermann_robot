@@ -145,8 +145,8 @@ class PersonTracker(Node):
         self.fg_margin = float(p("foreground_margin", 0.2))
         self.fg_search_beams = int(p("foreground_search_beams", 3))
         # tracking
-        self.sigma_obs = float(p("sigma_obs", 0.10))              # leg_tracker
-        self.sigma_acc = float(p("sigma_acc", 1.0))               # m/s^2 walking
+        self.sigma_obs = float(p("sigma_obs", 0.15))              # leg_tracker
+        self.sigma_acc = float(p("sigma_acc", 0.6))               # m/s^2 walking
         self.gate_dist = float(p("association_gate", 0.35))
         self.merge_dist = float(p("merge_dist", 0.45))
         self.confirm_travel = float(p("confirm_travel_m", 0.5))   # leg_tracker
@@ -515,7 +515,7 @@ class PersonTracker(Node):
             ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
             k = int(np.argmin(ds))
             gate = self.gate_dist * (2.0 if t.confirmed else 1.0)
-            if ds[k] <= gate + t.speed * dt:
+            if ds[k] <= gate + min(t.speed, 1.2) * dt:
                 t.update(cands[unmatched[k]], self.sigma_obs,
                          cand_seps[unmatched[k]])
                 t.last_seen_s = now_s
@@ -528,7 +528,7 @@ class PersonTracker(Node):
             ds = [float(np.linalg.norm(singles[i] - t.xy)) for i in free_singles]
             k = int(np.argmin(ds))
             gate = self.gate_dist * (2.0 if t.confirmed else 1.0)
-            if ds[k] <= gate + t.speed * dt:
+            if ds[k] <= gate + min(t.speed, 1.2) * dt:
                 t.update(singles[free_singles[k]], self.sigma_obs)
                 t.last_seen_s = now_s
                 free_singles.pop(k)
@@ -545,13 +545,12 @@ class PersonTracker(Node):
                 near = min(confirmed,
                            key=lambda c: float(np.linalg.norm(c.xy - t.xy)))
                 if float(np.linalg.norm(near.xy - t.xy)) <= self.merge_dist:
-                    if t.last_seen_s >= near.last_seen_s:  # take fresher fix
-                        near.x[:2] = t.x[:2]
-                        near.x[2:] = 0.7 * near.x[2:] + 0.3 * t.x[2:]
-                        near.P = np.diag([self.sigma_obs**2, self.sigma_obs**2,
-                                          near.P[2, 2], near.P[3, 3]])
+                    if t.last_seen_s >= near.last_seen_s:
+                        # absorb as a MEASUREMENT -- teleporting the track to
+                        # the duplicate's raw centroid made the marker jump
+                        # between legs/blob and blew up the speed estimate
+                        near.update(np.asarray(t.xy), self.sigma_obs)
                         near.last_seen_s = t.last_seen_s
-                    near.hits += t.hits
                     continue
                 merged.append(t)
             self.tracks = merged
