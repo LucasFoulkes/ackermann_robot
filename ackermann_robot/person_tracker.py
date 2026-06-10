@@ -152,6 +152,10 @@ class PersonTracker(Node):
         self.still_defect_s = float(p("still_defect_s", 5.0))
         self.drop_after_s = float(p("drop_after_s", 1.5))
         self.drop_confirmed_after_s = float(p("drop_confirmed_after_s", 6.0))
+        self.drop_pos_std = float(p("drop_pos_std", 1.0))
+        self.reid_window_s = float(p("reid_window_s", 3.0))
+        self.reid_dist = float(p("reid_dist", 0.75))
+        self.confirm_free_occ_max = float(p("confirm_free_occ_max", 10.0))
         self.max_speed = float(p("max_person_speed", 3.0))
         # static-map veto
         self.use_map_veto = bool(p("use_map_veto", True))
@@ -160,6 +164,7 @@ class PersonTracker(Node):
 
         self.fixed_frame = str(p("fixed_frame", "odom"))
         self.tracks = []
+        self.dead_people = []            # (id, xy, drop_time) for re-id
         self.target_id = None
         self.map_msg = None
         self.last_scan_s = None
@@ -280,6 +285,33 @@ class PersonTracker(Node):
             return m.data[row * m.info.width + col] >= self.veto_occ
         return False
 
+    def free_space_ok(self, xy_fixed, stamp):
+        """Mean occupancy of the 5x5 map neighborhood must be low for a track
+        to CONFIRM as a person. People walk through free space; parallax
+        phantoms hug mapped obstacles. Gates confirmation only (never
+        updates), and unknown/unmapped space is allowed."""
+        m = self.map_msg
+        if m is None:
+            return True
+        tf_map = self.tf2d(m.header.frame_id, self.fixed_frame, stamp)
+        if tf_map is None:
+            return True
+        pt = self.apply2d(tf_map, [xy_fixed])[0]
+        res = m.info.resolution
+        col = int((pt[0] - m.info.origin.position.x) / res)
+        row = int((pt[1] - m.info.origin.position.y) / res)
+        vals = []
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                r_, c_ = row + dr, col + dc
+                if 0 <= r_ < m.info.height and 0 <= c_ < m.info.width:
+                    v = m.data[r_ * m.info.width + c_]
+                    if v >= 0:
+                        vals.append(v)
+        if not vals:
+            return True
+        return (sum(vals) / len(vals)) < self.confirm_free_occ_max
+
     # --- main loop ---------------------------------------------------------
 
     def on_scan(self, msg):
@@ -356,26 +388,44 @@ class PersonTracker(Node):
         for t in self.tracks:
             if t.last_seen_s != now_s:
                 t.x[2:] *= 0.85
+        self.dead_people = [d for d in self.dead_people
+                            if now_s - d[2] <= self.reid_window_s]
         for i in unmatched:
-            self.tracks.append(Track(cands[i], now_s, self.sigma_obs))
+            t = Track(cands[i], now_s, self.sigma_obs)
+            # re-id: a confirmed person who briefly vanished (occlusion, scan
+            # dropout) comes back as the same id, already confirmed
+            for k, (pid, xy, ts) in enumerate(self.dead_people):
+                if float(np.linalg.norm(np.asarray(cands[i]) - xy)) <= self.reid_dist:
+                    t.id, t.confirmed = pid, True
+                    self.dead_people.pop(k)
+                    self.get_logger().info(
+                        f"person {pid} re-identified after {now_s - ts:.1f}s")
+                    break
+            self.tracks.append(t)
 
         # lifecycle: confirm by travel, drop stale or implausible
         kept = []
         for t in self.tracks:
             age = now_s - t.last_seen_s
             limit = self.drop_confirmed_after_s if t.confirmed else self.drop_after_s
-            if age > limit or t.speed > self.max_speed:
+            # coasting diffuses P; drop once the estimate is too uncertain to
+            # chase rather than blindly trusting it for the full time limit
+            pos_std = math.sqrt(max(0.0, float(t.P[0, 0] + t.P[1, 1])))
+            diffuse = t.confirmed and age > 0.5 and pos_std > self.drop_pos_std
+            if age > limit or t.speed > self.max_speed or diffuse:
                 if t.confirmed:
-                    why = (f"unseen {age:.1f}s" if age > limit
-                           else f"speed {t.speed:.1f} m/s")
+                    why = (f"speed {t.speed:.1f} m/s" if t.speed > self.max_speed
+                           else f"unseen {age:.1f}s, pos std {pos_std:.2f} m")
                     self.get_logger().info(f"person {t.id} dropped ({why})")
+                    self.dead_people.append((t.id, t.xy.copy(), now_s))
                 continue
             if (not t.confirmed and t.travelled >= self.confirm_travel
                     and t.hits >= 8
                     and t.straightness >= self.confirm_straightness
                     and t.gait_osc >= self.gait_osc_min
                     and t.gait_alternations >= 2
-                    and self.confirm_speed_min <= t.speed <= self.max_speed):
+                    and self.confirm_speed_min <= t.speed <= self.max_speed
+                    and self.free_space_ok(t.xy, msg.header.stamp)):
                 t.confirmed = True
                 self.get_logger().info(
                     f"person {t.id} confirmed at ({t.xy[0]:.2f}, {t.xy[1]:.2f}) "

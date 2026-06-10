@@ -96,16 +96,21 @@ controller_server:
 planner_server:
   ros__parameters:
     transform_tolerance: 1.5
-    expected_planner_frequency: 2.0
+    expected_planner_frequency: 1.0   # BT replans at 1 Hz
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
       tolerance: 0.5
       allow_unknown: true
+      # Plan on a half-resolution copy (0.2 m cells): ~4x fewer expansions.
+      downsample_costmap: true
+      downsampling_factor: 2
       max_iterations: 200000
-      max_planning_time: 1.5
+      max_planning_time: 0.5
       motion_model_for_search: "REEDS_SHEPP"   # Ackermann with reverse, no spin-in-place
-      angle_quantization_bins: 72
+      # 32 bins (11 deg) matches the downsampled 0.2 m grid: at R=1.1 m one
+      # bin of heading change ~ one cell of travel. 72 wasted expansions.
+      angle_quantization_bins: 32
       # Physical full lock = curvature ~1.2 1/m (R~0.83 m), set in cmd_vel_to_effort.
       # Plan wider than that: R = 1.1 m leaves headroom — RPP path corrections often
       # demand tighter turns than the path itself when the robot is off-track.
@@ -230,8 +235,14 @@ global_costmap:
       # Narrower sides (±0.095): when parked parallel to a wall the long edge was
       # clipping inflation even with ~1 cm physical gap (see RViz along-wall stalls).
       footprint: "[[-0.075, -0.095], [-0.075, 0.095], [0.323, 0.095], [0.323, -0.095]]"
-      resolution: 0.05
+      resolution: 0.1
       track_unknown_space: true
+      # Rolling 12 m window instead of the full SLAM map: Smac cost grows with
+      # map area and 2 Hz replanning saturated the Pi. Follow goals are always
+      # near the robot; person_follower clamps goals into these bounds.
+      rolling_window: true
+      width: 12
+      height: 12
       # Static SLAM map + LIVE obstacle layers: without them the planner only
       # sees the SLAM map, plans straight through fresh obstacles, and RPP
       # collision-ahead + recoveries loop forever on the same blocked path.
