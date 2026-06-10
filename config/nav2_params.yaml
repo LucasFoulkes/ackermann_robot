@@ -102,9 +102,12 @@ planner_server:
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
       tolerance: 0.5
       allow_unknown: true
-      # Plan on a half-resolution copy (0.2 m cells): ~4x fewer expansions.
-      downsample_costmap: true
-      downsampling_factor: 2
+      # DO NOT enable downsample_costmap with a rolling costmap: the
+      # downsampler only refreshes its origin when the costmap SIZE changes,
+      # and a rolling window never does -- the copy stays at origin (0,0) and
+      # every plan fails "Start Coordinates outside bounds" (2026-06-10 run).
+      # The 0.1 m rolling window is already 4x fewer cells than the old map.
+      downsample_costmap: false
       max_iterations: 200000
       max_planning_time: 0.5
       motion_model_for_search: "REEDS_SHEPP"   # Ackermann with reverse, no spin-in-place

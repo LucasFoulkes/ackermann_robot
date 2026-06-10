@@ -168,12 +168,14 @@ class PersonTracker(Node):
         self.target_id = None
         self.map_msg = None
         self.last_scan_s = None
+        self.last_gate_log_s = 0.0
 
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
 
-        self.create_subscription(LaserScan, "/scan", self.on_scan,
-                                 qos_profile_sensor_data)
+        sub_scan = self.create_subscription(LaserScan, "/scan", self.on_scan,
+                                            qos_profile_sensor_data)
+        self.get_logger().info(f"listening on {sub_scan.topic_name}")
         map_qos = QoSProfile(depth=1,
                              reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
@@ -312,6 +314,26 @@ class PersonTracker(Node):
             return True
         return (sum(vals) / len(vals)) < self.confirm_free_occ_max
 
+    def gate_report(self, t, stamp):
+        """(failed_gate_names, one-line metrics) for the confirm decision."""
+        checks = [
+            ("travel", t.travelled >= self.confirm_travel,
+             f"trav {t.travelled:.2f}"),
+            ("hits", t.hits >= 8, f"hits {t.hits}"),
+            ("straight", t.straightness >= self.confirm_straightness,
+             f"str {t.straightness:.2f}"),
+            ("gait", t.gait_osc >= self.gait_osc_min,
+             f"osc {t.gait_osc:.2f}"),
+            ("alt", t.gait_alternations >= 2,
+             f"alt x{t.gait_alternations}"),
+            ("speed", self.confirm_speed_min <= t.speed <= self.max_speed,
+             f"spd {t.speed:.2f}"),
+            ("freespace", self.free_space_ok(t.xy, stamp), "occ"),
+        ]
+        fails = [name for name, passed, _ in checks if not passed]
+        detail = " ".join(d for _, _, d in checks)
+        return fails, detail
+
     # --- main loop ---------------------------------------------------------
 
     def on_scan(self, msg):
@@ -440,6 +462,23 @@ class PersonTracker(Node):
                 t.still_since_s = None
             kept.append(t)
         self.tracks = kept
+
+        # decision log: which gates each serious track passes/fails. This is
+        # the ground truth for tuning false/missed person detections.
+        if self.debug and now_s - self.last_gate_log_s >= 2.0:
+            self.last_gate_log_s = now_s
+            lines = []
+            for t in sorted(self.tracks, key=lambda t: -t.hits)[:6]:
+                if t.hits < 5:
+                    continue
+                fails, detail = self.gate_report(t, msg.header.stamp)
+                verdict = ("PERSON" if t.confirmed
+                           else ("CONFIRMABLE" if not fails
+                                 else "no: " + ",".join(fails)))
+                lines.append(f"  id {t.id} ({t.xy[0]:.2f},{t.xy[1]:.2f}) "
+                             f"{detail} -> {verdict}")
+            if lines:
+                self.get_logger().info("track gates:\n" + "\n".join(lines))
 
         self.publish(msg.header.stamp)
 
