@@ -28,7 +28,7 @@ controller_server:
     # Ride out brief stalls (e.g. RPP collision-ahead) before failing FollowPath.
     failure_tolerance: 2.0
     progress_checker_plugins: ["progress_checker"]
-    goal_checker_plugins: ["goal_checker"]
+    goal_checker_plugins: ["goal_checker", "follow_checker"]
     controller_plugins: ["FollowPath"]
 
     # PoseProgressChecker counts heading change as progress too, so slow Ackermann
@@ -43,6 +43,11 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::PositionGoalChecker"
       xy_goal_tolerance: 0.35
+
+    # person following: chase in close before declaring "arrived"
+    follow_checker:
+      plugin: "nav2_controller::PositionGoalChecker"
+      xy_goal_tolerance: 0.10
       stateful: true
 
     FollowPath:

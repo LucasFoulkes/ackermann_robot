@@ -16,7 +16,7 @@
         </Sequence>
       </RateController>
       <KeepRunningUntilFailure>
-        <FollowPath path="{truncated_path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+        <FollowPath path="{truncated_path}" controller_id="{selected_controller}" goal_checker_id="follow_checker" error_code_id="{follow_path_error_code}"/>
       </KeepRunningUntilFailure>
     </PipelineSequence>
   </BehaviorTree>
