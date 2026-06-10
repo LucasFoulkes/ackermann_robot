@@ -8,7 +8,7 @@
 ekf_filter_node:
   ros__parameters:
     # Output rate. Keep <= imu_throttle imu_hz; Pi may not sustain 30 under load.
-    frequency: 20.0
+    frequency: 30.0   # smoother /odom for the steering PI; EKF predicts between measurements
     sensor_timeout: 0.5
     two_d_mode: true
     publish_tf: true
