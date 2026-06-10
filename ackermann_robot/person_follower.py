@@ -57,6 +57,7 @@ class PersonFollower(Node):
         self.pub_status = self.create_publisher(String, "/follow/status", 5)
         self.create_service(SetBool, "/follow/enable", self.on_enable)
         self.create_timer(0.2, self.tick)
+        self.create_timer(2.0, self.heartbeat)
         self.get_logger().info(
             f"person_follower ready ({'ARMED' if self.enabled else 'DISABLED'}). "
             f"BT: {self.bt_xml}")
@@ -72,7 +73,9 @@ class PersonFollower(Node):
         try:
             t = self.tf_buf.lookup_transform(self.goal_frame, ps.header.frame_id,
                                              rclpy.time.Time())
-        except Exception:
+        except Exception as e:
+            self.get_logger().warning(f"TF {ps.header.frame_id}->{self.goal_frame} failed: {e}",
+                                      throttle_duration_sec=5.0)
             return None
         tr = t.transform.translation
         yaw = yaw_of(t.transform.rotation)
@@ -143,6 +146,26 @@ class PersonFollower(Node):
         dy = self.last_target.pose.position.y - t.transform.translation.y
         return math.hypot(dx, dy)
 
+    def heartbeat(self):
+        fresh = (self.last_target_s is not None
+                 and self.now_s() - self.last_target_s < self.lost_timeout_s)
+        d = self.target_distance()
+        goal = ("ACTIVE" if self.goal_handle is not None
+                else "pending" if self.goal_pending else "none")
+        self.get_logger().info(
+            f"[hb] {'armed' if self.enabled else 'DISABLED'} | target "
+            f"{'fresh' if fresh else 'stale/none'}"
+            + (f" {d:.2f} m" if d is not None else "")
+            + f" | nav goal {goal}")
+        try:
+            n = self.get_node_names().count("person_follower")
+            if n > 1:
+                self.get_logger().error(
+                    f"{n} person_follower nodes running! They will preempt each "
+                    "other's goals — kill the extras.")
+        except Exception:
+            pass
+
     def tick(self):
         if not self.enabled:
             return
@@ -166,7 +189,11 @@ class PersonFollower(Node):
         self.goal_pending = True
         fut = self.nav_client.send_goal_async(goal)
         fut.add_done_callback(self.on_goal_response)
-        self.status("following person")
+        d = self.target_distance()
+        self.status(
+            f"sending follow goal ({goal.pose.pose.position.x:.2f}, "
+            f"{goal.pose.pose.position.y:.2f})"
+            + (f", person {d:.2f} m away" if d is not None else ""))
 
     def on_goal_response(self, fut):
         self.goal_pending = False
@@ -179,7 +206,12 @@ class PersonFollower(Node):
 
     def on_result(self, fut):
         self.goal_handle = None
-        self.status("follow goal ended")
+        try:
+            st = fut.result().status
+        except Exception:
+            st = -1
+        names = {4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
+        self.status(f"follow goal ended: {names.get(st, f'status {st}')}")
 
     def cancel_goal(self, why):
         if self.goal_handle is not None:

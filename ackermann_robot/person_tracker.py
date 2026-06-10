@@ -317,6 +317,10 @@ class PersonTracker(Node):
             age = now_s - t.last_seen_s
             limit = self.drop_confirmed_after_s if t.confirmed else self.drop_after_s
             if age > limit or t.speed > self.max_speed:
+                if t.confirmed:
+                    why = (f"unseen {age:.1f}s" if age > limit
+                           else f"speed {t.speed:.1f} m/s")
+                    self.get_logger().info(f"person {t.id} dropped ({why})")
                 continue
             if (not t.confirmed and t.travelled >= self.confirm_travel
                     and t.hits >= 8
@@ -324,8 +328,9 @@ class PersonTracker(Node):
                     and self.confirm_speed_min <= t.speed <= self.max_speed):
                 t.confirmed = True
                 self.get_logger().info(
-                    f"person {t.id} confirmed (travelled {t.travelled:.2f} m, "
-                    f"straightness {t.straightness:.2f}, {t.speed:.2f} m/s)")
+                    f"person {t.id} confirmed at ({t.xy[0]:.2f}, {t.xy[1]:.2f}) "
+                    f"odom (travelled {t.travelled:.2f} m, straightness "
+                    f"{t.straightness:.2f}, {t.speed:.2f} m/s, hits {t.hits})")
             if t.speed < 0.25:
                 if t.still_since_s is None:
                     t.still_since_s = now_s
@@ -404,7 +409,15 @@ class PersonTracker(Node):
             target = min(others_moving, key=dist)
         elif cur is None and people:
             target = min(people, key=dist)
-        self.target_id = target.id if target is not None else None
+        new_id = target.id if target is not None else None
+        if new_id != self.target_id:
+            if new_id is None:
+                self.get_logger().info("target lost (no confirmed people)")
+            else:
+                self.get_logger().info(
+                    f"target -> person {new_id} (dist {dist(target):.2f} m, "
+                    f"speed {target.speed:.2f} m/s)")
+        self.target_id = new_id
         if target is not None:
             ps = PoseStamped()
             ps.header.stamp = stamp
