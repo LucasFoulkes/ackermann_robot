@@ -68,6 +68,10 @@ def generate_launch_description():
             "pointcloud.enable": ParameterValue(enable_pointcloud, value_type=bool),
             "pointcloud__neon_.enable": ParameterValue(enable_pointcloud, value_type=bool),
             # Still emit cloud points where there's no color texture.
+            # hardware-reset the camera at startup: the D435i firmware wedges
+            # (depth stream opens but "Frames didn't arrived" forever) and
+            # survives node restarts -- only a reset clears it (2026-06-10).
+            "initial_reset": True,
             "pointcloud.allow_no_texture_points": True,
             "pointcloud__neon_.allow_no_texture_points": True,
             # 16UC1 depth cannot be JPEG-compressed; whitelist transports so a
