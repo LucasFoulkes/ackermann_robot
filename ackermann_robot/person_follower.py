@@ -38,6 +38,7 @@ class PersonFollower(Node):
             "/behavior_trees/follow_person.xml"
         self.bt_xml = str(p("behavior_tree", default_bt))
         self.retreat_dist = float(p("retreat_dist", 0.40))
+        self.standoff = float(p("standoff_m", 0.75))
         self.resume_dist = float(p("resume_dist", 0.70))
         self.retreat_speed = float(p("retreat_speed", 0.13))
         self.retreat_max_s = float(p("retreat_max_s", 4.0))
@@ -87,11 +88,28 @@ class PersonFollower(Node):
         out.header.stamp = self.get_clock().now().to_msg()
         out.header.frame_id = self.goal_frame
         x, y = ps.pose.position.x, ps.pose.position.y
-        out.pose.position.x = tr.x + c * x - s * y
-        out.pose.position.y = tr.y + s * x + c * y
-        pyaw = yaw_of(ps.pose.orientation) + yaw
-        out.pose.orientation.z = math.sin(pyaw / 2)
-        out.pose.orientation.w = math.cos(pyaw / 2)
+        px = tr.x + c * x - s * y
+        py = tr.y + s * x + c * y
+        # pull the goal back toward the robot: the person is an obstacle in
+        # the costmap, a goal inside them can never be planned to
+        gx, gy = px, py
+        try:
+            t2 = self.tf_buf.lookup_transform(self.goal_frame, "base_link",
+                                              rclpy.time.Time())
+            rx, ry = t2.transform.translation.x, t2.transform.translation.y
+            d = math.hypot(px - rx, py - ry)
+            if d > 1e-3:
+                back = min(self.standoff, d)
+                gx = px - (px - rx) / d * back
+                gy = py - (py - ry) / d * back
+        except Exception:
+            pass
+        out.pose.position.x = gx
+        out.pose.position.y = gy
+        # face the person from the goal point
+        gyaw = math.atan2(py - gy, px - gx)
+        out.pose.orientation.z = math.sin(gyaw / 2)
+        out.pose.orientation.w = math.cos(gyaw / 2)
         return out
 
     def status(self, text):
@@ -168,6 +186,7 @@ class PersonFollower(Node):
             return
         goal = NavigateToPose.Goal()
         goal.pose = self.last_target
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
         goal.behavior_tree = self.bt_xml
         self.goal_pending = True
         fut = self.nav_client.send_goal_async(goal)

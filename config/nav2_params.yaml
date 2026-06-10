@@ -77,7 +77,7 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
-      tolerance: 0.25
+      tolerance: 0.5
       allow_unknown: true
       max_iterations: 200000
       max_planning_time: 1.5

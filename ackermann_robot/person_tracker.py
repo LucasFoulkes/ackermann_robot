@@ -364,7 +364,9 @@ class PersonTracker(Node):
             m.pose.position.z = 0.6
             m.scale.x = m.scale.y = 0.3
             m.scale.z = 1.2
-            if t.speed < 0.25:
+            if t.id == self.target_id:
+                m.color.r, m.color.g, m.color.b = 1.0, 0.1, 0.1   # target = RED
+            elif t.speed < 0.25:
                 m.color.r = m.color.g = m.color.b = 0.5   # standing = gray
             else:
                 import colorsys
