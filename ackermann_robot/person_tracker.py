@@ -141,6 +141,8 @@ class PersonTracker(Node):
         self.blob_w_max = float(p("merged_legs_width_max", 0.40))  # feet together
         self.max_range = float(p("max_range", 5.0))
         self.pair_dist = float(p("max_leg_pairing_dist", 0.45))   # single-scan stance width
+        self.fg_margin = float(p("foreground_margin", 0.2))
+        self.fg_search_beams = int(p("foreground_search_beams", 3))
         # tracking
         self.sigma_obs = float(p("sigma_obs", 0.10))              # leg_tracker
         self.sigma_acc = float(p("sigma_acc", 1.0))               # m/s^2 walking
@@ -212,13 +214,39 @@ class PersonTracker(Node):
         pts = np.stack([xs, ys], axis=1)
         gaps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
         breaks = np.where(gaps > self.jump_dist)[0]
-        clusters = np.split(pts, breaks + 1)
+        parts = np.split(np.arange(len(idx)), breaks + 1)
         # the scan wraps at +-pi: merge first/last clusters if they touch
-        if len(clusters) > 1:
-            if np.linalg.norm(clusters[0][0] - clusters[-1][-1]) <= self.jump_dist:
-                clusters[0] = np.vstack([clusters[-1], clusters[0]])
-                clusters.pop()
-        return [c for c in clusters if len(c) >= self.min_points]
+        if len(parts) > 1:
+            if np.linalg.norm(pts[parts[0][0]] - pts[parts[-1][-1]]) <= self.jump_dist:
+                parts[0] = np.concatenate([parts[-1], parts[0]])
+                parts.pop()
+        out = []
+        for part in parts:
+            if len(part) < self.min_points:
+                continue
+            if not self.foreground_ok(r, idx, part):
+                continue
+            out.append(pts[part])
+        return out
+
+    def foreground_ok(self, r, idx, part):
+        """True if the cluster stands in FRONT of its surroundings: the first
+        valid beam just outside each end must be deeper by fg_margin (or give
+        no return). Real legs always pass (floor/wall behind them); slivers
+        of background revealed past a moving occluder -- the phantom 'people'
+        that appear whenever the robot or a person moves -- have a nearer
+        neighbor on at least one side and fail."""
+        n = len(r)
+        cr = float(np.median(r[idx[part]]))
+        for step, end in ((-1, int(idx[part[0]])), (1, int(idx[part[-1]]))):
+            for k in range(1, self.fg_search_beams + 1):
+                v = r[(end + step * k) % n]
+                if not np.isfinite(v) or v <= 0.0:
+                    continue          # no return = open space = clear side
+                if v - cr <= self.fg_margin:
+                    return False
+                break
+        return True
 
     def leg_candidates(self, clusters):
         legs, blobs, blob_w = [], [], []
