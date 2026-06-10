@@ -40,6 +40,7 @@ class PersonFollower(Node):
             "/behavior_trees/follow_person.xml"
         self.bt_xml = str(p("behavior_tree", default_bt))
         self.standoff = float(p("standoff_m", 0.45))
+        self.min_chase_dist = float(p("min_chase_dist", 0.9))
         self.lost_timeout_s = float(p("lost_timeout_s", 8.0))
         self.goal_frame = str(p("goal_frame", "map"))
         self.update_min_period_s = float(p("update_min_period_s", 0.3))
@@ -211,8 +212,10 @@ class PersonFollower(Node):
         fresh = age is not None and age < self.lost_timeout_s
         recent = age is not None and age < self.send_max_age_s
 
+        d = self.target_distance()
         if (self.goal_handle is None and not self.goal_pending and recent
-                and self.now_s() >= self.next_send_s):
+                and self.now_s() >= self.next_send_s
+                and (d is None or d >= self.min_chase_dist)):
             self.send_goal()
         elif self.goal_handle is not None and not fresh:
             self.cancel_goal(f"person lost > {self.lost_timeout_s:.0f}s")

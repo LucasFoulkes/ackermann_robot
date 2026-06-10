@@ -100,6 +100,26 @@ class Track:
         return self.travelled / self.path_len if self.path_len > 0.05 else 0.0
 
     @property
+    def gait_alternations(self):
+        """Sign reversals of significant leg-separation change. Walking opens
+        and closes the legs every step; the slow width drift of a static
+        object edge seen from a moving robot is monotonic."""
+        n, direction, ref = 0, 0, None
+        for s in self.sep_hist:
+            if ref is None:
+                ref = s
+                continue
+            d = s - ref
+            if abs(d) < 0.04:
+                continue
+            new_dir = 1 if d > 0 else -1
+            if direction != 0 and new_dir != direction:
+                n += 1
+            direction = new_dir
+            ref = s
+        return n
+
+    @property
     def gait_osc(self):
         """Leg-separation oscillation (m). Walking legs swing apart/together
         every step; static pairs (gap edges, posts) keep constant spacing."""
@@ -131,7 +151,7 @@ class PersonTracker(Node):
         self.gait_osc_min = float(p("gait_osc_min", 0.07))
         self.still_defect_s = float(p("still_defect_s", 5.0))
         self.drop_after_s = float(p("drop_after_s", 1.5))
-        self.drop_confirmed_after_s = float(p("drop_confirmed_after_s", 3.0))
+        self.drop_confirmed_after_s = float(p("drop_confirmed_after_s", 6.0))
         self.max_speed = float(p("max_person_speed", 3.0))
         # static-map veto
         self.use_map_veto = bool(p("use_map_veto", True))
@@ -316,7 +336,7 @@ class PersonTracker(Node):
                 break
             ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
             k = int(np.argmin(ds))
-            if ds[k] <= self.gate_dist:
+            if ds[k] <= self.gate_dist + t.speed * dt:
                 t.update(cands[unmatched[k]], self.sigma_obs,
                          cand_seps[unmatched[k]])
                 t.last_seen_s = now_s
@@ -328,7 +348,7 @@ class PersonTracker(Node):
                 continue
             ds = [float(np.linalg.norm(singles[i] - t.xy)) for i in free_singles]
             k = int(np.argmin(ds))
-            if ds[k] <= self.gate_dist:
+            if ds[k] <= self.gate_dist + t.speed * dt:
                 t.update(singles[free_singles[k]], self.sigma_obs)
                 t.last_seen_s = now_s
                 free_singles.pop(k)
@@ -354,13 +374,15 @@ class PersonTracker(Node):
                     and t.hits >= 8
                     and t.straightness >= self.confirm_straightness
                     and t.gait_osc >= self.gait_osc_min
+                    and t.gait_alternations >= 2
                     and self.confirm_speed_min <= t.speed <= self.max_speed):
                 t.confirmed = True
                 self.get_logger().info(
                     f"person {t.id} confirmed at ({t.xy[0]:.2f}, {t.xy[1]:.2f}) "
                     f"odom (travelled {t.travelled:.2f} m, straightness "
                     f"{t.straightness:.2f}, {t.speed:.2f} m/s, gait "
-                    f"{t.gait_osc:.2f} m, hits {t.hits})")
+                    f"{t.gait_osc:.2f} m x{t.gait_alternations}, "
+                    f"hits {t.hits})")
             if t.speed < 0.25:
                 if t.still_since_s is None:
                     t.still_since_s = now_s

@@ -29,7 +29,7 @@ controller_server:
     failure_tolerance: 2.0
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["goal_checker"]
-    controller_plugins: ["FollowPath"]
+    controller_plugins: ["FollowPath", "FollowSoft"]
 
     # PoseProgressChecker counts heading change as progress too, so slow Ackermann
     # turns / multi-point maneuvers are not falsely flagged "stuck". Smaller radius
@@ -70,6 +70,28 @@ controller_server:
       max_allowed_time_to_collision_up_to_carrot: 1.5
       # If still stuck with "collision ahead" on open path, set false (less safe outdoors).
       use_collision_detection: true
+    # Person-follow controller: same RPP tune but no "collision ahead" abort.
+    # The followed person IS a lethal costmap obstacle sitting at the end of
+    # the path, so the collision check fires on every approach and the goal
+    # aborts. Approach speed still scales down via regulated scaling.
+    FollowSoft:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.20
+      lookahead_dist: 0.45
+      min_lookahead_dist: 0.30
+      max_lookahead_dist: 0.70
+      lookahead_time: 2.0
+      use_velocity_scaled_lookahead_dist: true
+      use_rotate_to_heading: false
+      allow_reversing: true
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 1.2
+      regulated_linear_scaling_min_speed: 0.12
+      transform_tolerance: 1.5
+      min_approach_linear_velocity: 0.10
+      approach_velocity_scaling_dist: 0.6
+      use_collision_detection: false
 
 planner_server:
   ros__parameters:

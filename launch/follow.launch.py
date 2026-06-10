@@ -15,7 +15,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     enabled = LaunchConfiguration("enabled", default="true")
-    map_veto = LaunchConfiguration("map_veto", default="true")
+    map_veto = LaunchConfiguration("map_veto", default="false")
     return LaunchDescription([
         # rcl writes each node's log file here (person_tracker_*.log,
         # person_follower_*.log) so failures can be read back after a run
