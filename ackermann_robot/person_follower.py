@@ -39,7 +39,7 @@ class PersonFollower(Node):
         self.goal_frame = str(p("goal_frame", "map"))
         self.update_min_period_s = float(p("update_min_period_s", 0.3))
 
-        self.enabled = False
+        self.enabled = bool(p("start_enabled", False))
         self.goal_handle = None
         self.goal_pending = False
         self.last_target = None          # PoseStamped in goal_frame
@@ -56,7 +56,8 @@ class PersonFollower(Node):
         self.create_service(SetBool, "/follow/enable", self.on_enable)
         self.create_timer(0.5, self.tick)
         self.get_logger().info(
-            f"person_follower ready (DISABLED). BT: {self.bt_xml}")
+            f"person_follower ready ({'ARMED' if self.enabled else 'DISABLED'}). "
+            f"BT: {self.bt_xml}")
 
     # --- helpers -----------------------------------------------------------
 
