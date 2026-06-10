@@ -38,7 +38,7 @@ controller_server:
       plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.08
       required_movement_angle: 0.35
-      movement_time_allowance: 20.0
+      movement_time_allowance: 10.0  # 20 s let real stalls grind too long
 
     goal_checker:
       plugin: "nav2_controller::PositionGoalChecker"

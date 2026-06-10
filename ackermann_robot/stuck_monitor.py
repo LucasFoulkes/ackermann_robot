@@ -15,6 +15,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
+from action_msgs.srv import CancelGoal
 
 
 class StuckMonitor(Node):
@@ -30,6 +31,12 @@ class StuckMonitor(Node):
         self.odom_min_v = float(p("odom_min_linear", 0.025))
         self.min_displacement = float(p("min_displacement_m", 0.04))
         self.stuck_time_s = float(p("stuck_time_s", 2.5))
+        # Act on stuck, not just report: cancel the nav goal after this many
+        # extra seconds of grinding (costmap-blind obstacles: too close for the
+        # camera, below the lidar). Canceling stops cmd_vel -> stale timeout
+        # zeroes the motors.
+        self.cancel_goals = bool(p("cancel_goals", True))
+        self.cancel_after_s = float(p("cancel_after_s", 4.0))
         self.cmd_grace_s = float(p("cmd_grace_s", 0.4))
         hz = max(1.0, float(p("check_hz", 10.0)))
 
@@ -47,6 +54,9 @@ class StuckMonitor(Node):
         self.create_subscription(Twist, cmd_fallback, self._on_cmd, 10)
         self.create_subscription(Odometry, odom_topic, self._on_odom, 10)
         self.pub = self.create_publisher(Bool, str(p("stuck_topic", "/robot_stuck")), 10)
+        self.cancel_cli = self.create_client(
+            CancelGoal, "/navigate_to_pose/_action/cancel_goal")
+        self.cancel_sent = False
         self.create_timer(1.0 / hz, self._tick)
 
         self.get_logger().info(
@@ -82,6 +92,7 @@ class StuckMonitor(Node):
             self.window_start = None
             self.window_start_pose = None
             self._set_stuck(False)
+            self.cancel_sent = False
             return
 
         if self.cmd_active_since is None:
@@ -104,6 +115,7 @@ class StuckMonitor(Node):
             self.window_start = now
             self.window_start_pose = self.pose
             self._set_stuck(False)
+            self.cancel_sent = False
             return
 
         if elapsed >= self.stuck_time_s:
@@ -112,6 +124,16 @@ class StuckMonitor(Node):
                 f"cmd v={self.cmd_v:+.2f} w={self.cmd_w:+.2f} but "
                 f"odom v={self.odom_v:+.2f}, disp={disp:.3f} m over {elapsed:.1f}s",
             )
+        if (self.cancel_goals and not self.cancel_sent
+                and elapsed >= self.stuck_time_s + self.cancel_after_s):
+            if self.cancel_cli.service_is_ready():
+                self.cancel_cli.call_async(CancelGoal.Request())  # empty = cancel all
+                self.cancel_sent = True
+                self.get_logger().warn(
+                    f"stuck {elapsed:.1f}s with motion commanded — canceling nav goal")
+            else:
+                self.get_logger().warn("stuck but nav cancel service not ready",
+                                       throttle_duration_sec=5.0)
 
     def _set_stuck(self, value: bool, detail: str = ""):
         if value == self.stuck:
