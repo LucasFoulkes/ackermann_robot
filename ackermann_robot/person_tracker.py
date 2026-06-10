@@ -505,6 +505,9 @@ class PersonTracker(Node):
                 f"confirmed {sum(1 for t in self.tracks if t.confirmed)}",
                 throttle_duration_sec=2.0)
 
+        cands_all = [np.asarray(c) for c in cands]
+        singles_all = [np.asarray(s) for s in singles]
+
         # predict, associate (greedy NN), update
         for t in self.tracks:
             t.predict(dt, self.sigma_acc)
@@ -532,6 +535,22 @@ class PersonTracker(Node):
                 t.update(singles[free_singles[k]], self.sigma_obs)
                 t.last_seen_s = now_s
                 free_singles.pop(k)
+        # the single most important diagnostic: WHY did the target miss
+        for t in self.tracks:
+            if not t.confirmed or t.last_seen_s == now_s:
+                continue
+            gate = self.gate_dist * 2.0 + min(t.speed, 1.2) * dt
+            dc = min((float(np.linalg.norm(c - t.xy)) for c in cands_all),
+                     default=float("inf"))
+            ds_ = min((float(np.linalg.norm(s - t.xy)) for s in singles_all),
+                      default=float("inf"))
+            self.get_logger().info(
+                f"target {t.id} NO UPDATE: nearest cand {dc:.2f} m, nearest "
+                f"single {ds_:.2f} m, gate {gate:.2f} m "
+                f"({len(cands_all)} cands/{len(singles_all)} singles, "
+                f"track spd {t.speed:.2f})",
+                throttle_duration_sec=1.0)
+
         # merge duplicates: a fresh track that forms on top of a confirmed
         # person steals their updates and the confirmed track starves (seen
         # as the enrolled id coasting while a new id rides the person)
