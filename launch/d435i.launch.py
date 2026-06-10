@@ -70,6 +70,11 @@ def generate_launch_description():
             # Still emit cloud points where there's no color texture.
             "pointcloud.allow_no_texture_points": True,
             "pointcloud__neon_.allow_no_texture_points": True,
+            # 16UC1 depth cannot be JPEG-compressed; whitelist transports so a
+            # mis-configured RViz 'compressed' subscription cannot spam
+            # "[16UC1] is not a color format" — only raw + compressedDepth exist.
+            "camera.depth.image_rect_raw.enable_pub_plugins": [
+                "image_transport/raw", "image_transport/compressedDepth"],
         }],
     )
 

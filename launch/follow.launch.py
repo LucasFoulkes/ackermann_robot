@@ -8,7 +8,7 @@ Needs the drive stack running (Nav2 + SLAM + odom). Runtime toggle:
   ros2 service call /follow/enable std_srvs/srv/SetBool "{data: false}"
 """
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -17,6 +17,9 @@ def generate_launch_description():
     enabled = LaunchConfiguration("enabled", default="true")
     map_veto = LaunchConfiguration("map_veto", default="true")
     return LaunchDescription([
+        # rcl writes each node's log file here (person_tracker_*.log,
+        # person_follower_*.log) so failures can be read back after a run
+        SetEnvironmentVariable("ROS_LOG_DIR", "/tmp/follow_log"),
         DeclareLaunchArgument("enabled", default_value=enabled,
                               description="start with following armed"),
         DeclareLaunchArgument("map_veto", default_value=map_veto,
