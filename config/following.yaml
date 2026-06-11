@@ -4,16 +4,16 @@ following_server:
     # 0.6 parked the person 0.3 m from the lidar (mounted 0.24 m ahead
     # of base_link) -- inside its self-return blind ring; they vanished
     desired_distance: 0.9
-    detection_timeout: 3.0          # tracker gaps are < 0.6 s when healthy
+    detection_timeout: 6.0          # tracker pauses publishing during gaps
     static_object_timeout: -1.0     # keep following a person standing still
-    linear_tolerance: 0.15
+    linear_tolerance: 0.25
     angular_tolerance: 3.14         # person yaw estimate is noise -- ignore
     skip_orientation: true
     search_by_rotating: false       # Ackermann cannot rotate in place
     max_retries: 100                # person tracking drops are normal, retry
     base_frame: base_link
     fixed_frame: odom
-    filter_coef: 0.1
+    filter_coef: 0.25   # 0.1 lagged so far behind that the robot stop-go flapped
     odom_topic: /odom
     transform_tolerance: 0.3
     controller:
