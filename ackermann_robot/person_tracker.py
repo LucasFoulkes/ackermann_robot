@@ -181,6 +181,8 @@ class PersonTracker(Node):
         self.leg_conf_create_min = float(p("leg_conf_create_min", 0.15))
         self.leg_conf_enroll_min = float(p("leg_conf_enroll_min", 0.35))
         self.leg_conf_drop = float(p("leg_conf_drop", 0.28))
+        self.recapture_after_s = float(p("recapture_after_s", 2.0))
+        self.recapture_dist = float(p("recapture_dist", 2.5))
         default_forest = os.path.join(
             get_package_share_directory("ackermann_robot"), "config",
             "trained_leg_detector_res=0.33.yaml")
@@ -718,6 +720,33 @@ class PersonTracker(Node):
 
         if self.enroll_mode and not any(t.confirmed for t in self.tracks):
             self.try_enroll(msg.header.stamp)
+
+        # the person WALKS; static clutter never does. If the target track
+        # has gone still while a moving leg-like track exists nearby, the
+        # track slipped onto furniture -- jump back to the moving legs.
+        if self.enroll_mode and self.robot_lin < 0.15:
+            cur = next((t for t in self.tracks if t.confirmed), None)
+            if (cur is not None and cur.still_since_s is not None
+                    and now_s - cur.still_since_s > self.recapture_after_s):
+                for c in sorted(self.tracks, key=lambda t: -t.leg_conf):
+                    if c.confirmed or c.hits < 5:
+                        continue
+                    if not (0.3 <= c.speed <= 2.5) or c.gait_osc < 0.08:
+                        continue
+                    if c.leg_conf < max(self.leg_conf_enroll_min,
+                                        cur.leg_conf - 0.05):
+                        continue
+                    if float(np.linalg.norm(c.xy - cur.xy)) > self.recapture_dist:
+                        continue
+                    cur.confirmed = False
+                    c.confirmed = True
+                    self.target_id = c.id
+                    self.get_logger().info(
+                        f"target moved on: person {cur.id} static (conf "
+                        f"{cur.leg_conf:.2f}) -> person {c.id} WALKING "
+                        f"({c.speed:.2f} m/s, gait {c.gait_osc:.2f}, conf "
+                        f"{c.leg_conf:.2f})")
+                    break
 
         # decision log: which gates each serious track passes/fails. This is
         # the ground truth for tuning false/missed person detections.
