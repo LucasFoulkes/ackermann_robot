@@ -33,7 +33,6 @@ from launch_ros.actions import Node
 def generate_launch_description():
     pkg = get_package_share_directory("ackermann_robot")
     nav_launch = os.path.join(pkg, "launch", "navigation.launch.py")
-    nav = LaunchConfiguration("nav", default="true")
 
     serial_port = LaunchConfiguration("serial_port", default="/dev/ttyUSB0")
     closed_loop = LaunchConfiguration("closed_loop", default="true")
@@ -53,9 +52,6 @@ def generate_launch_description():
                               description="D435i IMU for EKF"),
         DeclareLaunchArgument("use_floor_scan", default_value=use_floor_scan,
                               description="D435i RANSAC -> /camera/scan in local costmap"),
-        DeclareLaunchArgument("nav", default_value=nav,
-                              description="start Nav2 (planner/costmaps); nav:=false for "
-                                          "follow3 keeps SLAM + odom + motors"),
         DeclareLaunchArgument("log_csv", default_value=log_csv,
                               description="CSV telemetry (one file per run in ~/ros2_ws/logs)"),
         Node(
@@ -65,17 +61,6 @@ def generate_launch_description():
             output="screen",
             condition=IfCondition(log_csv),
         ),
-        # republishes /scan + /camera/scan with the followed person's beams
-        # NaN'd out so the costmaps never see them as an obstacle
-        Node(
-            package="ackermann_robot",
-            executable="scan_mask",
-            name="scan_mask",
-            output="screen",
-        ),
-        # always included: nav:=false used to drop the whole include, which
-        # killed lidar/odom/SLAM/motors too -- the flag now lives inside
-        # navigation.launch.py and only gates the Nav2 servers
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(nav_launch),
             launch_arguments={
@@ -84,7 +69,6 @@ def generate_launch_description():
                 "use_ekf": use_ekf,
                 "use_imu": use_imu,
                 "use_floor_scan": use_floor_scan,
-                "nav": nav,
             }.items(),
         ),
     ])

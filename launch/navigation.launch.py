@@ -29,7 +29,6 @@ def _launch_setup(context, *args, **kwargs):
     floor_scan_yaml = os.path.join(pkg, "config", "depth_floor_scan.yaml")
     stuck_yaml = os.path.join(pkg, "config", "stuck_monitor.yaml")
 
-    nav = LaunchConfiguration("nav").perform(context) == "true"
     use_ekf = LaunchConfiguration("use_ekf").perform(context) == "true"
     use_imu = LaunchConfiguration("use_imu").perform(context) == "true"
     use_floor_scan = LaunchConfiguration("use_floor_scan").perform(context) == "true"
@@ -58,8 +57,7 @@ def _launch_setup(context, *args, **kwargs):
         executable="scan_throttle",
         name="scan_throttle",
         output="screen",
-        # person-masked input: slam was absorbing the followed person into the map
-        parameters=[{"hz": slam_hz, "in_topic": "/scan_nav", "out_topic": "/scan_slam"}],
+        parameters=[{"hz": slam_hz, "in_topic": "/scan", "out_topic": "/scan_slam"}],
     ))
     if log_stats:
         actions.append(Node(
@@ -143,13 +141,6 @@ def _launch_setup(context, *args, **kwargs):
             output="screen",
             parameters=[driver_yaml],
         ),
-    ])
-    if not nav:
-        # follow mode CPU diet: skip Nav2 (planner/controller/behaviors/BT +
-        # their costmaps) but keep EVERYTHING above -- sensors, odom, motor
-        # chain and especially SLAM: the mission is "follow me while mapping"
-        return actions
-    actions.extend([
         Node(
             package="nav2_controller",
             executable="controller_server",
@@ -206,11 +197,6 @@ def generate_launch_description():
         DeclareLaunchArgument("use_ekf", default_value=use_ekf),
         DeclareLaunchArgument("use_imu", default_value=use_imu,
                               description="D435i IMU for EKF"),
-        DeclareLaunchArgument(
-            "nav", default_value="true",
-            description="start Nav2 (planner/controller/costmaps); "
-                        "nav:=false keeps SLAM + odom + motors for follow3",
-        ),
         DeclareLaunchArgument(
             "use_floor_scan", default_value="true",
             description="D435i depth RANSAC -> /camera/scan for local costmap",
