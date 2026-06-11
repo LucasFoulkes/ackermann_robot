@@ -25,10 +25,8 @@ following_server:
       # (0.83 m); cmd_vel_to_effort clamps curvature at 1.2 1/m regardless
       v_angular_max: 0.22
       slowdown_radius: 0.5
-      # check the simulated trajectory against the LOCAL COSTMAP (fed by the
-      # person-masked scans, so the followed person never reads as a wall)
-      use_collision_detection: true
-      costmap_topic: "/local_costmap/costmap_raw"
-      footprint_topic: "/local_costmap/published_footprint"
-      projection_time: 2.0
-      simulation_time_step: 0.1
+      # the following server REJECTS collision detection at configure time
+      # ("not supported in the following server") -- it froze the whole stack
+      # on 2026-06-10. Safety must come from nav2_collision_monitor on the
+      # cmd_vel chain instead.
+      use_collision_detection: false
