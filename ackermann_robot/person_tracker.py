@@ -180,6 +180,7 @@ class PersonTracker(Node):
         self.enroll_min_travel = float(p("enroll_min_travel", 0.25))
         self.leg_conf_create_min = float(p("leg_conf_create_min", 0.15))
         self.leg_conf_enroll_min = float(p("leg_conf_enroll_min", 0.35))
+        self.leg_conf_drop = float(p("leg_conf_drop", 0.28))
         default_forest = os.path.join(
             get_package_share_directory("ackermann_robot"), "config",
             "trained_leg_detector_res=0.33.yaml")
@@ -572,9 +573,17 @@ class PersonTracker(Node):
             if not unmatched:
                 break
             ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
-            k = int(np.argmin(ds))
             gate = (self.gate_dist + 1.5 * dt if t.confirmed
                     else self.gate_dist + min(t.speed, 1.2) * dt)
+            if t.confirmed:
+                # prefer leg-like candidates in the gate, not merely nearest:
+                # a chair/wall cluster 10 cm closer must not win the person
+                scored = [(d * (1.6 - cand_cf[i]), j)
+                          for j, (i, d) in enumerate(zip(unmatched, ds))
+                          if d <= gate]
+                k = min(scored)[1] if scored else int(np.argmin(ds))
+            else:
+                k = int(np.argmin(ds))
             if ds[k] <= gate:
                 t.update(cands[unmatched[k]], self.sigma_obs,
                          cand_seps[unmatched[k]], cand_cf[unmatched[k]])
@@ -670,12 +679,17 @@ class PersonTracker(Node):
             # chase rather than blindly trusting it for the full time limit
             pos_std = math.sqrt(max(0.0, float(t.P[0, 0] + t.P[1, 1])))
             diffuse = t.confirmed and age > 0.5 and pos_std > self.drop_pos_std
-            if age > limit or t.speed > self.max_speed or diffuse:
+            not_legs = t.confirmed and t.leg_conf < self.leg_conf_drop
+            if age > limit or t.speed > self.max_speed or diffuse or not_legs:
                 if t.confirmed:
-                    why = (f"speed {t.speed:.1f} m/s" if t.speed > self.max_speed
+                    why = (f"leg conf {t.leg_conf:.2f} -- slipped onto a "
+                           "non-person" if not_legs
+                           else f"speed {t.speed:.1f} m/s"
+                           if t.speed > self.max_speed
                            else f"unseen {age:.1f}s, pos std {pos_std:.2f} m")
                     self.get_logger().info(f"person {t.id} dropped ({why})")
-                    self.dead_people.append((t.id, t.xy.copy(), now_s))
+                    if not not_legs:   # never re-id back onto furniture
+                        self.dead_people.append((t.id, t.xy.copy(), now_s))
                 continue
             if (self.auto_confirm and not t.confirmed
                     and t.travelled >= self.confirm_travel
