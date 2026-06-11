@@ -54,7 +54,8 @@ def generate_launch_description():
         DeclareLaunchArgument("use_floor_scan", default_value=use_floor_scan,
                               description="D435i RANSAC -> /camera/scan in local costmap"),
         DeclareLaunchArgument("nav", default_value=nav,
-                              description="start Nav2 (planner/costmaps); not needed for follow2/follow3"),
+                              description="start Nav2 (planner/costmaps); nav:=false for "
+                                          "follow3 keeps SLAM + odom + motors"),
         DeclareLaunchArgument("log_csv", default_value=log_csv,
                               description="CSV telemetry (one file per run in ~/ros2_ws/logs)"),
         Node(
@@ -72,15 +73,18 @@ def generate_launch_description():
             name="scan_mask",
             output="screen",
         ),
+        # always included: nav:=false used to drop the whole include, which
+        # killed lidar/odom/SLAM/motors too -- the flag now lives inside
+        # navigation.launch.py and only gates the Nav2 servers
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(nav_launch),
-            condition=IfCondition(nav),
             launch_arguments={
                 "serial_port": serial_port,
                 "closed_loop": closed_loop,
                 "use_ekf": use_ekf,
                 "use_imu": use_imu,
                 "use_floor_scan": use_floor_scan,
+                "nav": nav,
             }.items(),
         ),
     ])

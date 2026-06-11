@@ -7,7 +7,8 @@
 Replaces the hand-crafted person_tracker with the field-proven pipeline:
 detect_leg_clusters (C++ RF detector) -> occupancy_grid_mapping (non-person
 static grid) -> joint_leg_tracker (Munkres + Kalman + free-space veto)
--> enroll_shim (front-cone target choice) -> following server.
+-> enroll_shim (front-cone target choice) -> following server
+-> collision monitor (stop/slowdown on person-masked /scan_nav).
 Needs the drive stack (lidar, odom, cmd_vel_to_effort).
 """
 import os
@@ -36,7 +37,8 @@ def generate_launch_description():
                  "exec ros2 bag record -o /tmp/follow_bag_$(date +%H%M%S) "
                  "/scan /scan_filtered /scan_nav /people_poses /person_target "
                  "/people_tracked /detected_leg_clusters /local_map "
-                 "/odom /tf /tf_static /cmd_vel_follow /cmd_vel_nav "
+                 "/odom /tf /tf_static /cmd_vel_follow /cmd_vel_follow_safe "
+                 "/cmd_vel_nav /collision_monitor_state "
                  "/filtered_dynamic_pose"],
             output="screen",
             condition=IfCondition(record),
@@ -108,18 +110,31 @@ def generate_launch_description():
             parameters=[os.path.join(share, "config", "following.yaml")],
             remappings=[("cmd_vel", "/cmd_vel_follow")],
         ),
+        # safety: the following server rejects its own use_collision_detection
+        # param ("not supported"), so obstacle stops live in a separate
+        # collision monitor on its cmd_vel: /cmd_vel_follow -> monitor ->
+        # /cmd_vel_follow_safe -> follow_client -> /cmd_vel_nav
+        Node(
+            package="nav2_collision_monitor",
+            executable="collision_monitor",
+            name="collision_monitor",
+            output="screen",
+            parameters=[os.path.join(share, "config", "collision_monitor.yaml")],
+        ),
         Node(
             package="nav2_lifecycle_manager",
             executable="lifecycle_manager",
             name="lifecycle_manager_following",
             output="screen",
             parameters=[{"autostart": True,
-                         "node_names": ["following_server"]}],
+                         "node_names": ["following_server",
+                                        "collision_monitor"]}],
         ),
         Node(
             package="ackermann_robot",
             executable="follow_client",
             name="follow_client",
             output="screen",
+            remappings=[("/cmd_vel_follow", "/cmd_vel_follow_safe")],
         ),
     ])
