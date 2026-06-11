@@ -20,6 +20,7 @@ import math
 import os
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy,
@@ -55,6 +56,7 @@ class Track:
         self.hits = 1
         self.still_since_s = None
         self.leg_conf = 0.5              # EWMA of classifier P(leg)
+        self.pos_hist = []               # (t, xy) of measured updates
         self.sep_hist = []               # observed leg separation / blob width
 
     def predict(self, dt, sigma_acc):
@@ -72,7 +74,7 @@ class Track:
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
 
-    def update(self, xy, sigma_obs, sep=None, conf=None):
+    def update(self, xy, sigma_obs, sep=None, conf=None, now_s=None):
         H = np.array([[1.0, 0, 0, 0], [0, 1.0, 0, 0]])
         R = np.eye(2) * sigma_obs**2
         y = np.asarray(xy) - H @ self.x
@@ -89,6 +91,24 @@ class Track:
                 self.sep_hist.pop(0)
         if conf is not None:
             self.leg_conf = 0.9 * self.leg_conf + 0.1 * float(conf)
+        if now_s is not None:
+            self.pos_hist.append((now_s, self.x[:2].copy()))
+            while self.pos_hist and now_s - self.pos_hist[0][0] > 3.0:
+                self.pos_hist.pop(0)
+
+    def walk_disp(self, now_s, window=2.5):
+        """Net displacement of measured positions over the window. Walkers
+        accumulate metres; clutter jitters around zero. (Net, not summed:
+        summed speed rewards jitter. Centroid-level, not per-leg: at ankle
+        height the stance foot is genuinely stationary half of each step.)"""
+        old = None
+        for ts, pxy in self.pos_hist:
+            if now_s - ts <= window:
+                old = pxy
+                break
+        if old is None:
+            return 0.0
+        return float(np.linalg.norm(self.pos_hist[-1][1] - old))
 
     @property
     def xy(self):
@@ -183,6 +203,13 @@ class PersonTracker(Node):
         self.leg_conf_drop = float(p("leg_conf_drop", 0.28))
         self.recapture_after_s = float(p("recapture_after_s", 2.0))
         self.recapture_dist = float(p("recapture_dist", 2.5))
+        # static-territory veto grid (Leigh ICRA'15): person association is
+        # forbidden where non-person detections were seen in the last window
+        self.occ_window_s = float(p("static_veto_window_s", 3.0))
+        self.occ_res = 0.1
+        self.occ_n = 240                                  # 24 m, odom frame
+        self.occ = np.full((self.occ_n, self.occ_n), -1e9)
+        self.occ_origin = None
         default_forest = os.path.join(
             get_package_share_directory("ackermann_robot"), "config",
             "trained_leg_detector_res=0.33.yaml")
@@ -404,6 +431,39 @@ class PersonTracker(Node):
             return True
         return (sum(vals) / len(vals)) < self.confirm_free_occ_max
 
+    def occ_cell(self, xy):
+        if self.occ_origin is None:
+            return None
+        i = int((xy[0] - self.occ_origin[0]) / self.occ_res)
+        j = int((xy[1] - self.occ_origin[1]) / self.occ_res)
+        if 0 <= i < self.occ_n and 0 <= j < self.occ_n:
+            return (i, j)
+        return None
+
+    def stamp_static(self, pts, now_s):
+        """Mark cells of NON-person detections; re-anchor on the robot when
+        it nears the grid edge (stale stamps expire in occ_window_s, so a
+        reset on re-anchor only costs a brief veto outage)."""
+        if self.robot_pose_prev is None:
+            return
+        rx, ry = self.robot_pose_prev[0], self.robot_pose_prev[1]
+        half = self.occ_n * self.occ_res / 2.0
+        if (self.occ_origin is None
+                or abs(rx - (self.occ_origin[0] + half)) > half * 0.5
+                or abs(ry - (self.occ_origin[1] + half)) > half * 0.5):
+            self.occ_origin = (rx - half, ry - half)
+            self.occ.fill(-1e9)
+        for pxy in pts:
+            c = self.occ_cell(pxy)
+            if c is None:
+                continue
+            i, j = c
+            self.occ[max(0, i - 1):i + 2, max(0, j - 1):j + 2] = now_s
+
+    def occupied(self, xy, now_s):
+        c = self.occ_cell(np.asarray(xy))
+        return c is not None and now_s - self.occ[c] <= self.occ_window_s
+
     def gate_report(self, t, stamp):
         """(failed_gate_names, one-line metrics) for the confirm decision."""
         checks = [
@@ -457,6 +517,8 @@ class PersonTracker(Node):
                 continue
             if t.leg_conf < self.leg_conf_enroll_min:
                 continue   # walked, but doesn't look like legs to the forest
+            if self.occupied(t.xy, stamp.sec + stamp.nanosec * 1e-9):
+                continue   # inside recently-static territory
             if best is None or d < best_d:
                 best, best_d = t, d
         if best is None:
@@ -567,48 +629,69 @@ class PersonTracker(Node):
         cands_all = [np.asarray(c) for c in cands]
         singles_all = [np.asarray(s) for s in singles]
 
-        # predict, associate (greedy NN), update
+        # predict, then GLOBAL assignment (Munkres) over ALL tracks: clutter
+        # tracks claim their own measurements simultaneously, so a chair-leg
+        # cluster is owned by the chair's track and cannot be handed to the
+        # person (Leigh ICRA'15). The person additionally may not match
+        # candidates inside recently-static territory (grid veto), and a
+        # PAUSED person track gets a tight gate (cannot reach out to clutter).
         for t in self.tracks:
             t.predict(dt, self.sigma_acc)
+        BIG = 1e6
         unmatched = list(range(len(cands)))
-        for t in sorted(self.tracks, key=lambda t: (not t.confirmed, -t.hits)):  # confirmed first: clutter tracks must not steal the target's candidate
-            if not unmatched:
-                break
-            ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
-            gate = (self.gate_dist + 1.5 * dt if t.confirmed
-                    else self.gate_dist + min(t.speed, 1.2) * dt)
-            if t.confirmed:
-                # prefer leg-like candidates in the gate, not merely nearest:
-                # a chair/wall cluster 10 cm closer must not win the person
-                scored = [(d * (1.6 - cand_cf[i]), j)
-                          for j, (i, d) in enumerate(zip(unmatched, ds))
-                          if d <= gate]
-                k = min(scored)[1] if scored else int(np.argmin(ds))
-            else:
-                k = int(np.argmin(ds))
-            if ds[k] <= gate:
-                t.update(cands[unmatched[k]], self.sigma_obs,
-                         cand_seps[unmatched[k]], cand_cf[unmatched[k]])
+        if self.tracks and cands:
+            cost = np.full((len(self.tracks), len(cands)), BIG)
+            for ti, t in enumerate(self.tracks):
+                walking = t.walk_disp(now_s) >= 0.15
+                gate = (self.gate_dist + (1.5 if walking else 0.3) * dt
+                        if t.confirmed
+                        else self.gate_dist + min(t.speed, 1.2) * dt)
+                for ci in range(len(cands)):
+                    d = float(np.linalg.norm(cands[ci] - t.xy))
+                    if d > gate:
+                        continue
+                    if t.confirmed and self.occupied(cands[ci], now_s):
+                        continue
+                    cost[ti, ci] = (d * (1.6 - cand_cf[ci])
+                                    if t.confirmed else d)
+            rows, cols = linear_sum_assignment(cost)
+            for ti, ci in zip(rows, cols):
+                if cost[ti, ci] >= BIG:
+                    continue
+                t = self.tracks[ti]
+                t.update(cands[ci], self.sigma_obs, cand_seps[ci],
+                         cand_cf[ci], now_s=now_s)
                 t.last_seen_s = now_s
-                unmatched.pop(k)
+                unmatched.remove(ci)
         # second pass: lone legs may update tracks that got no pair this scan
         free_singles = list(range(len(singles)))
-        for t in sorted(self.tracks, key=lambda t: (not t.confirmed, -t.hits)):  # confirmed first: clutter tracks must not steal the target's candidate
+        for t in sorted(self.tracks, key=lambda t: -t.hits):
             if not free_singles or t.last_seen_s == now_s:
                 continue
             ds = [float(np.linalg.norm(singles[i] - t.xy)) for i in free_singles]
             k = int(np.argmin(ds))
-            gate = (self.gate_dist + 1.5 * dt if t.confirmed
+            walking = t.walk_disp(now_s) >= 0.15
+            gate = (self.gate_dist + (1.5 if walking else 0.3) * dt
+                    if t.confirmed
                     else self.gate_dist + min(t.speed, 1.2) * dt)
-            if ds[k] <= gate:
-                # a lone leg sits ~half a stance off the person center --
-                # treat as a LOW-WEIGHT observation or the target pose hops
-                # left-leg/right-leg at scan rate (0.4 m/s phantom motion
-                # measured on a standing person, bag 192543)
+            if ds[k] <= gate and not (
+                    t.confirmed
+                    and self.occupied(singles[free_singles[k]], now_s)):
+                # lone leg ~half a stance off-center: low-weight observation
                 t.update(singles[free_singles[k]], self.sigma_obs * 2.5,
-                         conf=singles_cf[free_singles[k]])
+                         conf=singles_cf[free_singles[k]], now_s=now_s)
                 t.last_seen_s = now_s
                 free_singles.pop(k)
+
+        # stamp static territory with every detection NOT belonging to the
+        # person -- these cells are no-go for the person for occ_window_s
+        person = next((t for t in self.tracks if t.confirmed), None)
+        def is_persons(pxy):
+            return (person is not None and person.last_seen_s == now_s
+                    and float(np.linalg.norm(pxy - person.xy)) <= 0.6)
+        self.stamp_static(
+            [pxy for pxy in (cands_all + singles_all) if not is_persons(pxy)],
+            now_s)
         # the single most important diagnostic: WHY did the target miss
         for t in self.tracks:
             if not t.confirmed or t.last_seen_s == now_s:
@@ -642,7 +725,8 @@ class PersonTracker(Node):
                         # absorb as a MEASUREMENT -- teleporting the track to
                         # the duplicate's raw centroid made the marker jump
                         # between legs/blob and blew up the speed estimate
-                        near.update(np.asarray(t.xy), self.sigma_obs * 2.0)
+                        near.update(np.asarray(t.xy), self.sigma_obs * 2.0,
+                                    now_s=now_s)
                         near.last_seen_s = t.last_seen_s
                     continue
                 merged.append(t)
@@ -732,6 +816,9 @@ class PersonTracker(Node):
                     if c.confirmed or c.hits < 5:
                         continue
                     if not (0.3 <= c.speed <= 2.5) or c.gait_osc < 0.08:
+                        continue
+                    if (c.walk_disp(now_s) < 0.3
+                            or self.occupied(c.xy, now_s)):
                         continue
                     if c.leg_conf < max(self.leg_conf_enroll_min,
                                         cur.leg_conf - 0.05):
