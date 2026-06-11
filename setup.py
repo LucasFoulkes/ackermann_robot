@@ -50,6 +50,7 @@ setup(
             'scan_throttle = ackermann_robot.scan_throttle:main',
             'scan_mask = ackermann_robot.scan_mask:main',
             'follow_client = ackermann_robot.follow_client:main',
+            'enroll_shim = ackermann_robot.enroll_shim:main',
             'tf_health = ackermann_robot.tf_health:main',
             'twist_logger = ackermann_robot.twist_logger:main',
             'stuck_monitor = ackermann_robot.stuck_monitor:main',
