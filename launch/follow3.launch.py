@@ -57,11 +57,14 @@ def generate_launch_description():
             parameters=[{
                 "forest_file": forest,
                 "fixed_frame": "odom",
-                "detection_threshold": 0.10,
+                # values from the package author's own Pi 5 deployment
+                # (github.com/ShunjiHashimoto/leg_tracker_ros2 launch), except
+                # min_points: his 10 assumes a 0.25 deg Hokuyo, 3x our density
+                "detection_threshold": 0.2,
                 "cluster_dist_euclid": 0.13,
                 "min_points_per_cluster": 3,   # C1 at 0.72 deg: ~5 pts/leg at 2 m
-                "max_detect_distance": 5.0,
-                "max_detected_clusters": -1,
+                "max_detect_distance": 4.0,
+                "max_detected_clusters": 10,   # caps the Python tracker's load
             }],
             remappings=[("/scan", "/scan_filtered")],
         ),
