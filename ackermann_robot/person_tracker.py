@@ -152,8 +152,8 @@ class PersonTracker(Node):
         self.fg_margin = float(p("foreground_margin", 0.2))
         self.fg_search_beams = int(p("foreground_search_beams", 3))
         # tracking
-        self.sigma_obs = float(p("sigma_obs", 0.15))              # leg_tracker
-        self.sigma_acc = float(p("sigma_acc", 0.6))               # m/s^2 walking
+        self.sigma_obs = float(p("sigma_obs", 0.20))              # leg_tracker
+        self.sigma_acc = float(p("sigma_acc", 0.45))               # m/s^2 walking
         self.gate_dist = float(p("association_gate", 0.35))
         self.merge_dist = float(p("merge_dist", 0.35))
         self.target_pub_max_unseen_s = float(p("target_pub_max_unseen_s", 0.6))
@@ -590,7 +590,11 @@ class PersonTracker(Node):
             gate = (self.gate_dist + 1.5 * dt if t.confirmed
                     else self.gate_dist + min(t.speed, 1.2) * dt)
             if ds[k] <= gate:
-                t.update(singles[free_singles[k]], self.sigma_obs,
+                # a lone leg sits ~half a stance off the person center --
+                # treat as a LOW-WEIGHT observation or the target pose hops
+                # left-leg/right-leg at scan rate (0.4 m/s phantom motion
+                # measured on a standing person, bag 192543)
+                t.update(singles[free_singles[k]], self.sigma_obs * 2.5,
                          conf=singles_cf[free_singles[k]])
                 t.last_seen_s = now_s
                 free_singles.pop(k)
@@ -627,7 +631,7 @@ class PersonTracker(Node):
                         # absorb as a MEASUREMENT -- teleporting the track to
                         # the duplicate's raw centroid made the marker jump
                         # between legs/blob and blew up the speed estimate
-                        near.update(np.asarray(t.xy), self.sigma_obs)
+                        near.update(np.asarray(t.xy), self.sigma_obs * 2.0)
                         near.last_seen_s = t.last_seen_s
                     continue
                 merged.append(t)
