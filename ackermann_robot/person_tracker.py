@@ -683,15 +683,22 @@ class PersonTracker(Node):
                 t.last_seen_s = now_s
                 free_singles.pop(k)
 
-        # stamp static territory with every detection NOT belonging to the
-        # person -- these cells are no-go for the person for occ_window_s
+        # stamp static territory ONLY with detections that belong to things
+        # that do not move. v1 stamped every non-person detection and was
+        # self-poisoning: the walking user stamped their own path (nobody
+        # confirmed yet) and one association miss stamped the target cells
+        # too -- the veto then refused the target their own legs 0.27 m away.
         person = next((t for t in self.tracks if t.confirmed), None)
-        def is_persons(pxy):
-            return (person is not None and person.last_seen_s == now_s
-                    and float(np.linalg.norm(pxy - person.xy)) <= 0.6)
-        self.stamp_static(
-            [pxy for pxy in (cands_all + singles_all) if not is_persons(pxy)],
-            now_s)
+        movers = [t for t in self.tracks
+                  if t.confirmed or t.walk_disp(now_s) >= 0.15]
+        def near_mover(pxy):
+            if (person is not None
+                    and float(np.linalg.norm(pxy - person.xy)) <= 0.8):
+                return True
+            return any(float(np.linalg.norm(pxy - m.xy)) <= 0.6
+                       for m in movers)
+        self.stamp_static([pxy for pxy in (cands_all + singles_all)
+                           if not near_mover(pxy)], now_s)
         # the single most important diagnostic: WHY did the target miss
         for t in self.tracks:
             if not t.confirmed or t.last_seen_s == now_s:
