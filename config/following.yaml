@@ -19,11 +19,14 @@ following_server:
     controller:
       k_phi: 2.0
       k_delta: 1.0
-      v_linear_min: 0.0
+      # v_min 0 let the control law slow to a crawl and spin toward an
+      # off-axis person -- a car cannot: bag 080245 shows 0.08 m/s + 0.16
+      # rad/s (R 0.5 m < full lock 0.83 m) commanded for 30 s while the
+      # person stood 2.9 m away. Keep rolling at >= 0.15 and cap omega so
+      # the worst commanded arc (0.18/0.15 = 1.2 1/m) IS full lock.
+      v_linear_min: 0.15
       v_linear_max: 0.20
-      # 0.22 rad/s at 0.2 m/s ~= R 0.9 m, just inside physical full lock
-      # (0.83 m); cmd_vel_to_effort clamps curvature at 1.2 1/m regardless
-      v_angular_max: 0.22
+      v_angular_max: 0.18
       slowdown_radius: 0.5
       # the following server REJECTS collision detection at configure time
       # ("not supported in the following server") -- it froze the whole stack
