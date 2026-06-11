@@ -157,7 +157,7 @@ class PersonTracker(Node):
         self.gate_dist = float(p("association_gate", 0.35))
         self.merge_dist = float(p("merge_dist", 0.35))
         self.target_pub_max_unseen_s = float(p("target_pub_max_unseen_s", 0.6))
-        self.min_range = float(p("min_range", 0.30))
+        self.min_range = float(p("min_range", 0.22))  # lidar is 0.24 m ahead of base_link; 0.30 blinded it to a person at standoff
         self.confirm_travel = float(p("confirm_travel_m", 0.5))   # leg_tracker
         self.confirm_straightness = float(p("confirm_straightness", 0.6))
         self.confirm_speed_min = float(p("confirm_speed_min", 0.25))

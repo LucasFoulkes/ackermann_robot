@@ -1,7 +1,9 @@
 following_server:
   ros__parameters:
     controller_frequency: 20.0      # 50 default is wasted on the Pi at 0.2 m/s
-    desired_distance: 0.6           # standoff from the person
+    # 0.6 parked the person 0.3 m from the lidar (mounted 0.24 m ahead
+    # of base_link) -- inside its self-return blind ring; they vanished
+    desired_distance: 0.9
     detection_timeout: 3.0          # tracker gaps are < 0.6 s when healthy
     static_object_timeout: -1.0     # keep following a person standing still
     linear_tolerance: 0.15
