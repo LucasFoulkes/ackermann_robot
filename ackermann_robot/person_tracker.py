@@ -568,7 +568,7 @@ class PersonTracker(Node):
         for t in self.tracks:
             t.predict(dt, self.sigma_acc)
         unmatched = list(range(len(cands)))
-        for t in sorted(self.tracks, key=lambda t: -t.hits):
+        for t in sorted(self.tracks, key=lambda t: (not t.confirmed, -t.hits)):  # confirmed first: clutter tracks must not steal the target's candidate
             if not unmatched:
                 break
             ds = [float(np.linalg.norm(cands[i] - t.xy)) for i in unmatched]
@@ -582,7 +582,7 @@ class PersonTracker(Node):
                 unmatched.pop(k)
         # second pass: lone legs may update tracks that got no pair this scan
         free_singles = list(range(len(singles)))
-        for t in sorted(self.tracks, key=lambda t: -t.hits):
+        for t in sorted(self.tracks, key=lambda t: (not t.confirmed, -t.hits)):  # confirmed first: clutter tracks must not steal the target's candidate
             if not free_singles or t.last_seen_s == now_s:
                 continue
             ds = [float(np.linalg.norm(singles[i] - t.xy)) for i in free_singles]
