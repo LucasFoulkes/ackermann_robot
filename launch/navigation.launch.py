@@ -57,7 +57,8 @@ def _launch_setup(context, *args, **kwargs):
         executable="scan_throttle",
         name="scan_throttle",
         output="screen",
-        parameters=[{"hz": slam_hz, "in_topic": "/scan", "out_topic": "/scan_slam"}],
+        # person-masked input: slam was absorbing the followed person into the map
+        parameters=[{"hz": slam_hz, "in_topic": "/scan_nav", "out_topic": "/scan_slam"}],
     ))
     if log_stats:
         actions.append(Node(

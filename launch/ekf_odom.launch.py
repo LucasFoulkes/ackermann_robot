@@ -55,7 +55,11 @@ def generate_launch_description():
                 "wait_for_transform": 0.2,
                 "args": "--Reg/Force3DoF true --Odom/ResetCountdown 1",
             }],
-            remappings=[("scan", "/scan"), ("odom", "/odom_icp")],
+            remappings=[("scan", "/scan_nav"), ("odom", "/odom_icp")],
+            # /scan_nav = person-masked (scan_mask): a walking person is a
+            # large moving blob that drags ICP scan-matching -- odometry
+            # spiked to 0.52 m/s on 0.2 m/s commands while being followed
+
             arguments=["--ros-args", "--log-level", "icp_odometry:=warn"],
         ),
         include("d435i.launch.py", condition=IfCondition(use_imu), launch_arguments=[
