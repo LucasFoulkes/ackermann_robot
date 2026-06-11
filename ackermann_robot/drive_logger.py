@@ -63,7 +63,7 @@ class DriveLogger(Node):
         self.f.write("t,cmd_v,cmd_w,odom_v,odom_w,eff_drive,eff_steer,"
                      "cpu_pct,trim_speed,trim_steer,map_x,map_y,map_yaw_deg\n")
         self.t0 = self.get_clock().now().nanoseconds
-        self.create_timer(0.1, self.tick)
+        self.create_timer(0.5, self.tick)   # 10 Hz CSV logging cost 20% of a core
 
     def on_cmd(self, m):
         self.cmd_v, self.cmd_w = m.linear.x, m.angular.z

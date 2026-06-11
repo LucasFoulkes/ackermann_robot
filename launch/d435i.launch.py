@@ -52,7 +52,7 @@ def generate_launch_description():
             # into base_link and /camera/scan stayed empty.
             "camera_name": "d435i",
             # Low depth res/rate: floor scan needs only coarse ~8Hz depth; cuts CPU.
-            "depth_module.depth_profile": "424x240x15",
+            "depth_module.depth_profile": "424x240x6",   # 15 fps cost 55% of a core (realsense+floor_scan) for a 0.2 m/s robot
             "enable_gyro": True,
             "enable_accel": True,
             # 0-None, 1-copy, 2-linear_interpolation. 2 = one fused imu topic.

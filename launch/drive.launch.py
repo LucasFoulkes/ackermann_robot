@@ -33,6 +33,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     pkg = get_package_share_directory("ackermann_robot")
     nav_launch = os.path.join(pkg, "launch", "navigation.launch.py")
+    nav = LaunchConfiguration("nav", default="true")
 
     serial_port = LaunchConfiguration("serial_port", default="/dev/ttyUSB0")
     closed_loop = LaunchConfiguration("closed_loop", default="true")
@@ -52,6 +53,8 @@ def generate_launch_description():
                               description="D435i IMU for EKF"),
         DeclareLaunchArgument("use_floor_scan", default_value=use_floor_scan,
                               description="D435i RANSAC -> /camera/scan in local costmap"),
+        DeclareLaunchArgument("nav", default_value=nav,
+                              description="start Nav2 (planner/costmaps); not needed for follow2/follow3"),
         DeclareLaunchArgument("log_csv", default_value=log_csv,
                               description="CSV telemetry (one file per run in ~/ros2_ws/logs)"),
         Node(
@@ -71,6 +74,7 @@ def generate_launch_description():
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(nav_launch),
+            condition=IfCondition(nav),
             launch_arguments={
                 "serial_port": serial_port,
                 "closed_loop": closed_loop,
