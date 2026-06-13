@@ -2,15 +2,49 @@ cmd_vel_to_effort:
   ros__parameters:
     # --- Geometry (matches urdf/robot.urdf.xacro measurement sheet) ---
     wheelbase: 0.2775          # m, rear axle -> front axle
-    # Full steer effort (+/-1.0) = physical full lock = max usable curvature ~1.2 1/m.
-    # delta = atan(kappa * L) = atan(1.2 * 0.2775) = 0.3218 rad (18.4 deg).
-    # This is the HARD limit (full lock); planner stays inside it (see nav2_params
-    # minimum_turning_radius) so the controller keeps tracking margin.
-    max_steer_angle: 0.321751  # rad (18.4 deg = curvature 1.2 1/m at full lock)
+    # EFFECTIVE steering model, not mechanical lock. Mechanical full lock is
+    # ~18.4 deg (kappa 1.2) but the wheels only get there after 1-2 s of rolling
+    # (servo-saver deflection + tire bore torque — dry steering can't reach lock
+    # at standstill; 2026-06-11 logs: kappa 0.44 at lock onset -> 0.65 sustained,
+    # peak ~0.9). Model the WOUND-IN capability: delta_max = atan(0.8 * L) =
+    # 0.2187 rad -> kappa_max 0.8. Gives RPP correction headroom above the
+    # planner's R=1.5 m (kappa 0.67) while not promising the static-lock 1.2
+    # the car never delivers mid-maneuver. Restore 0.321751 only if a stiffer
+    # servo saver / stronger servo closes the wind-in gap.
+    max_steer_angle: 0.2187  # rad (effective wound-in lock; kappa_max ~0.8 1/m)
 
     # cmd_vel linear.x at this speed -> logical throttle 1.0 (then deadband -> raw PWM)
     # Starting value from field log (~0.86 m/s scale); re-tune with |linear.x| > 0.05 test
     max_speed: 0.85
+    # Reverse slope measured 2026-06-11: cmd -0.2 -> odom -0.8 m/s with the old
+    # symmetric mapping (raw just past deadband is already fast). 3.4 makes
+    # logical reverse throttle proportional to real speed; speed PI trims rest.
+    max_speed_rev: 3.4
+
+    # Hold neutral when commanded direction opposes measured motion (drivetrain
+    # needs ~1.3 s to reverse; steering sign was mirrored during 3-point turns).
+    direction_interlock: true
+    interlock_v_stop: 0.05   # m/s, engage new direction below this |odom_v|
+
+    # Stiction kick: breakaway throttle > keep-rolling throttle, and the reverse
+    # window is razor thin (raw -0.58 may not move, -0.66 ran away at 0.8 m/s).
+    # Ramp extra effort while commanded to move but stationary; bleed it fast
+    # once rolling. 2026-06-11 logs: 37% of reverse time stalled without this.
+    # Steering hysteresis compensation (loaded linkage is history-dependent:
+    # servo saver + tire bore friction; lifted robot centers fine). Backlash
+    # inverse overdrives half the slop width in the direction of motion;
+    # dither (2% @ 4 Hz) keeps the linkage from settling into stiction.
+    # Tune: wheels visibly buzzing -> lower dither_amp; steering still lands
+    # short after reversals -> raise steer_backlash by 0.04 steps.
+    steer_backlash: 0.12
+    steer_dither_amp: 0.02
+    steer_dither_hz: 4.0
+
+    stiction_kick: true
+    kick_delay_s: 0.3    # stationary this long before kicking
+    kick_rate: 0.4       # logical effort per second of stall
+    kick_max: 0.35       # cap (logical units)
+    kick_v_moving: 0.05  # m/s, kick bleeds off above this
 
     apply_deadband: true
     # Raw /ackermann/cmd_effort deadband (PlotJuggler startup test — starting values)
@@ -26,7 +60,10 @@ cmd_vel_to_effort:
 
     # --- Closed-loop PI trims (/odom twist feedback; feedforward stays dominant) ---
     # Speed loop (linear.x -> throttle). closed_loop above enables it.
-    vel_kp: 0.3
+    # kp raised 0.3 -> 0.6: reverse breakaway surges to ~3x the commanded speed
+    # (steep ESC curve past the deadband); the PI must catch the overshoot
+    # within a couple of control ticks or reverse legs oscillate surge/stall.
+    vel_kp: 0.6
     vel_ki: 0.3
     vel_trim_max: 0.2
     # Yaw-rate loop (angular.z -> steering, only while |v| > yaw_min_speed).
@@ -36,9 +73,16 @@ cmd_vel_to_effort:
     # sign mismatch, set yaw_kp/yaw_ki to 0.0 and investigate.
     yaw_closed_loop: true
     yaw_kp: 0.4
-    yaw_ki: 0.3
-    yaw_trim_max: 0.25
-    yaw_int_max: 0.3
+    # Integral sized to cover the steering WIND-IN gap (servo saver + tire bore
+    # torque: wheels reach commanded angle only after ~1-2 s of rolling, see
+    # max_steer_angle note). With ki=0.6 a sustained curvature error of ~0.3
+    # winds ~0.18 effort/s -> the trim bridges the gap in about a second, then
+    # bleeds off as the wheels arrive. Old 0.3/0.25 took ~3 s — slower than the
+    # mechanical wind-in it was meant to cancel. If it weaves, drop yaw_kp
+    # first (proportional causes oscillation; the integral is the workhorse).
+    yaw_ki: 0.6
+    yaw_trim_max: 0.4
+    yaw_int_max: 0.5
     yaw_min_speed: 0.10
     # /cmd_vel_to_effort/debug [speed_trim, steer_trim, v_meas, w_meas] @ control_hz
     # for PlotJuggler tuning. Turn off once gains are settled.

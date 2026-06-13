@@ -5,9 +5,17 @@
       <PipelineSequence name="NavigateWithReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
-        <!-- Pause before plan so map->odom can catch up after prior goal / map resize. -->
-        <Wait wait_duration="3.0"/>
-        <RateController hz="0.5">
+        <!-- Pause before plan so map->odom can catch up after prior goal / map resize.
+             Was 3.0 s (99%-CPU era insurance) = the entire goal-to-motion delay;
+             TF healthy since the 2026-06-09 perf overhaul, so 1.0 s keeps a margin
+             for SLAM map resizes. Restore 3.0 if planner logs TF extrapolation or
+             goal-time "Start occupied" errors return. -->
+        <Wait wait_duration="1.0"/>
+        <!-- 0.33 Hz. History: 0.5 churned maneuvers; 0.2 left the robot standing
+             5 s after hiccups; 0.5 + ALL_DIRECTION flapped drive direction every
+             replan (2026-06-12 13:30). 3 s + BIDIRECTIONAL goal headings is the
+             balance: maneuvers get time to commit, failures wait at most 3 s. -->
+        <RateController hz="0.33">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
             <!-- NO_VALID_PATH on a static map won't clear with global-only; local may
@@ -40,11 +48,13 @@
             <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
-          <!-- 2) Drive forward along corridor — best escape when parallel to a side wall
-               with open space ahead (BackUp wedges / hits side inflation). -->
+          <!-- 2) Reverse FIRST: stalls are mostly nose-in (tight corner / wall ahead at
+               the curvature limit) — driving forward digs in deeper. 0.5 m gives the
+               R=1.5 m planner room for the next attempt; 0.20 m/s clears reverse
+               stiction (0.14 sat at the deadband edge and often never moved). -->
+          <BackUp backup_dist="0.50" backup_speed="0.20" error_code_id="{backup_error_code}"/>
+          <!-- 3) Forward if reverse blocked (parallel to a side wall, space ahead). -->
           <DriveOnHeading dist_to_travel="0.40" speed="0.14" time_allowance="15"/>
-          <!-- 3) Reverse if forward blocked. -->
-          <BackUp backup_dist="0.35" backup_speed="0.14" error_code_id="{backup_error_code}"/>
           <Wait wait_duration="3.0"/>
         </RoundRobin>
       </ReactiveFallback>

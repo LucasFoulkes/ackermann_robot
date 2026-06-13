@@ -20,7 +20,12 @@ depth_floor_scan:
     angle_max: 1.0
     angle_increment: 0.0075
     range_min: 0.15
-    range_max: 2.0   # local costmap is rolling 4x4m -> reaches 2.0m per axis; beams past that land outside the box (and D435i noise grows with range)
+    range_max: 1.5   # Nav2 inf->range_max raytrace; was 2.0 = local costmap radius (4 m / 2)
+    max_mark_range: 1.0   # low obstacles only; far FOV edge was the front dotted arc
+    far_arc_ratio: 0.75   # drop isolated hits beyond 75% of max_mark_range
+    far_arc_neighbor_m: 0.12
+    ring_spread_max: 0.18
+    ring_min_coverage: 0.30
     max_floor_tilt_deg: 20.0
     floor_height_min_m: 0.08
     floor_height_max_m: 0.22

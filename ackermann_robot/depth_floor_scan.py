@@ -83,6 +83,13 @@ class DepthFloorScan(Node):
         self.angle_inc = float(p("angle_increment", 0.0075))
         self.range_min = float(p("range_min", 0.15))
         self.range_max = float(p("range_max", 6.0))
+        # D435i depth noise clusters near range_max -> phantom costmap ring if marked.
+        # Keep range_max for inf clear rays; never MARK obstacles beyond max_mark_range.
+        self.max_mark_range = float(p("max_mark_range", 1.65))
+        self.far_arc_ratio = float(p("far_arc_ratio", 0.75))
+        self.far_arc_neighbor_m = float(p("far_arc_neighbor_m", 0.12))
+        self.ring_spread_max = float(p("ring_spread_max", 0.18))
+        self.ring_min_coverage = float(p("ring_min_coverage", 0.30))
         process_hz = float(p("process_hz", 8.0))
         self.max_floor_tilt = float(p("max_floor_tilt_deg", 20.0))
         self.floor_h_min = float(p("floor_height_min_m", 0.08))
@@ -210,8 +217,9 @@ class DepthFloorScan(Node):
         bearing = np.arctan2(xy[:, 1], xy[:, 0])
         dist = np.hypot(xy[:, 0], xy[:, 1])
 
+        mark_max = min(self.range_max, self.max_mark_range)
         valid = (bearing >= self.angle_min) & (bearing < self.angle_max) \
-            & (dist >= self.range_min) & (dist <= self.range_max)
+            & (dist >= self.range_min) & (dist <= mark_max)
         bearing, dist = bearing[valid], dist[valid]
 
         ranges = np.full(self.n_bins, np.inf)
@@ -220,9 +228,44 @@ class DepthFloorScan(Node):
             bins = np.clip(bins, 0, self.n_bins - 1)
             np.minimum.at(ranges, bins, dist)
 
+        ranges = self._suppress_range_ring(ranges)
+        ranges = self._filter_far_arc_dots(ranges)
         self._publish_scan(now, ranges)
         h = Header(stamp=now, frame_id=self.scan_frame)
         self.pub_obst.publish(pc2.create_cloud_xyz32(h, body.astype(np.float32)))
+
+    def _suppress_range_ring(self, ranges):
+        """Drop equidistant far marks (D435i noise / Nav2 inf-at-range_max artifact)."""
+        arr = np.asarray(ranges, dtype=np.float64)
+        finite = arr[np.isfinite(arr) & (arr > self.range_min + 0.05)]
+        if finite.size < self.n_bins * self.ring_min_coverage:
+            return ranges
+        spread = float(np.percentile(finite, 90) - np.percentile(finite, 10))
+        med = float(np.median(finite))
+        if spread <= self.ring_spread_max and med >= self.range_min + 0.35:
+            self.get_logger().warn(
+                f"suppressing camera scan ring: median={med:.2f} m spread={spread:.2f} m",
+                throttle_duration_sec=2.0,
+            )
+            return np.full(self.n_bins, np.inf)
+        return ranges
+
+    def _filter_far_arc_dots(self, ranges):
+        """Drop isolated far hits on the depth FOV edge (dotted front arc on costmap)."""
+        arr = np.asarray(ranges, dtype=np.float64)
+        out = arr.copy()
+        threshold = self.max_mark_range * self.far_arc_ratio
+        for i in range(self.n_bins):
+            if not np.isfinite(arr[i]) or arr[i] <= threshold:
+                continue
+            neighbors = 0
+            for j in (i - 2, i - 1, i + 1, i + 2):
+                if 0 <= j < self.n_bins and np.isfinite(arr[j]):
+                    if abs(arr[j] - arr[i]) <= self.far_arc_neighbor_m:
+                        neighbors += 1
+            if neighbors < 1:
+                out[i] = np.inf
+        return out
 
     def _publish_empty(self):
         self._publish_scan(self.get_clock().now().to_msg(), np.full(self.n_bins, np.inf))

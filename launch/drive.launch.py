@@ -39,6 +39,7 @@ def generate_launch_description():
     use_ekf = LaunchConfiguration("use_ekf", default="true")
     use_imu = LaunchConfiguration("use_imu", default="true")
     use_floor_scan = LaunchConfiguration("use_floor_scan", default="true")
+    enable_color = LaunchConfiguration("enable_color", default="true")
     log_csv = LaunchConfiguration("log_csv", default="true")
 
     return LaunchDescription([
@@ -52,8 +53,10 @@ def generate_launch_description():
                               description="D435i IMU for EKF"),
         DeclareLaunchArgument("use_floor_scan", default_value=use_floor_scan,
                               description="D435i RANSAC -> /camera/scan in local costmap"),
+        DeclareLaunchArgument("enable_color", default_value=enable_color,
+                              description="D435i RGB image (low-res); false saves CPU"),
         DeclareLaunchArgument("log_csv", default_value=log_csv,
-                              description="CSV telemetry (one file per run in ~/ros2_ws/logs)"),
+                              description="Single drive CSV log (twist, turn limits, pose) -> ~/ros2_ws/logs"),
         Node(
             package="ackermann_robot",
             executable="drive_logger",
@@ -69,6 +72,7 @@ def generate_launch_description():
                 "use_ekf": use_ekf,
                 "use_imu": use_imu,
                 "use_floor_scan": use_floor_scan,
+                "enable_color": enable_color,
             }.items(),
         ),
     ])

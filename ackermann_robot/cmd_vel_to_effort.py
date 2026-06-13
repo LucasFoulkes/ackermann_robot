@@ -44,6 +44,11 @@ class CmdVelToEffort(Node):
 
         self.L = float(p("wheelbase", 0.2775))
         self.max_speed = max(0.05, float(p("max_speed", 0.85)))
+        # Reverse drivetrain is far hotter than forward: 2026-06-11 logs show
+        # cmd -0.2 m/s -> odom -0.8 m/s with a symmetric mapping (4x overshoot,
+        # every reverse leg of a 3-point turn overshoots its cusp). Separate
+        # scale keeps logical reverse throttle proportional to real speed.
+        self.max_speed_rev = max(0.05, float(p("max_speed_rev", 3.4)))
         self.max_steer = max(0.05, float(p("max_steer_angle", math.radians(15.0))))
         # Bicycle model: |omega| <= |v| * kappa_max, kappa_max = tan(delta_max) / L.
         self.kappa_max = math.tan(self.max_steer) / self.L
@@ -74,6 +79,42 @@ class CmdVelToEffort(Node):
         # Below this |v| yaw rate carries no steering information (omega = v*tan(delta)/L).
         self.yaw_min_speed = float(p("yaw_min_speed", 0.10))
 
+        # --- direction-change interlock ---
+        # The drivetrain needs ~1.3 s to actually reverse direction (deadband +
+        # ESC + momentum). Commanding the new direction immediately puts the
+        # steering sign out of phase with the real motion — curvature comes out
+        # mirrored and 3-point turns thrash (2026-06-11 logs: odom_v kept the
+        # old sign >1 s after every cmd_v flip). Hold neutral until nearly stopped.
+        self.interlock = bool(p("direction_interlock", True))
+        self.interlock_v_stop = float(p("interlock_v_stop", 0.05))
+
+        # --- stiction kick ---
+        # Breakaway throttle is higher than keep-rolling throttle, and the
+        # reverse window is razor thin (raw -0.58 sometimes never moves, -0.66
+        # was the 0.8 m/s runaway — 2026-06-11 logs: 37% of reverse time stalled,
+        # one 19 s stall). When commanded to move but odom shows no motion for
+        # kick_delay_s, ramp extra throttle until the robot breaks free, then
+        # drop it immediately so it doesn't become a runaway.
+        self.kick_enabled = bool(p("stiction_kick", True))
+        self.kick_delay_s = float(p("kick_delay_s", 0.3))
+        self.kick_rate = float(p("kick_rate", 0.4))      # logical effort per second
+        self.kick_max = float(p("kick_max", 0.35))       # logical effort cap
+        self.kick_v_moving = float(p("kick_v_moving", 0.05))  # m/s, kick ends here
+        self._stall_since = None
+        self._kick = 0.0
+
+        # --- steering hysteresis compensation ---
+        # The loaded linkage is hysteretic (servo saver + tire bore friction):
+        # wheel angle depends on motion history, not just the command —
+        # 2026-06-12 logs: straight-line curvature scattered BOTH ways, lifted
+        # robot centers fine. Backlash inverse overdrives by half the slop
+        # width in the direction of motion; dither keeps the linkage unstuck.
+        self.steer_backlash = float(p("steer_backlash", 0.12))   # effort units of slop
+        self.steer_dither_amp = float(p("steer_dither_amp", 0.02))
+        self.steer_dither_hz = float(p("steer_dither_hz", 4.0))
+        self._steer_prev_des = 0.0
+        self._steer_dir = 0.0
+
         self.publish_debug = bool(p("publish_debug", False))
 
         self.cmd = (0.0, 0.0)
@@ -88,7 +129,7 @@ class CmdVelToEffort(Node):
         self.create_subscription(
             TwistStamped, p("cmd_stamped_topic", "/cmd_vel_nav"),
             lambda m: self._on_cmd(m.twist), 10)
-        if self.closed_loop or self.yaw_closed_loop:
+        if self.closed_loop or self.yaw_closed_loop or self.interlock:
             self.create_subscription(Odometry, p("odom_topic", "/odom"), self._on_odom, 10)
         self.pub = self.create_publisher(
             Float32MultiArray, p("effort_topic", "/ackermann/cmd_effort"), 10)
@@ -134,34 +175,116 @@ class CmdVelToEffort(Node):
             self.pub.publish(Float32MultiArray(data=[0.0, 0.0]))
             if self.pub_debug is not None:
                 self.pub_debug.publish(Float32MultiArray(data=[
-                    0.0, 0.0, float(self.v_meas), float(self.w_meas)]))
+                    0.0, 0.0, float(self.v_meas), float(self.w_meas),
+                    0.0, 0.0, 0.0, 0.0, 0.0, float(self.kappa_max), 0.0]))
             return
-        v, w = self.cmd
+        v, w_cmd = self.cmd
+
+        # Direction-change interlock: commanded sign opposes measured motion.
+        # Neutral throttle + centered steer until the robot has nearly stopped,
+        # then the new direction engages with the correct steering sign.
+        odom_fresh = (now - self.last_odom_ns) <= self.odom_timeout_ns
+        if (self.interlock and odom_fresh and abs(v) > self.v_eps
+                and v * self.v_meas < 0.0
+                and abs(self.v_meas) > self.interlock_v_stop):
+            self.integral = 0.0
+            self.yaw_integral = 0.0
+            self.pub.publish(Float32MultiArray(data=[0.0, 0.0]))
+            if self.pub_debug is not None:
+                self.pub_debug.publish(Float32MultiArray(data=[
+                    0.0, 0.0, float(self.v_meas), float(self.w_meas),
+                    float(w_cmd), 0.0, 0.0, 0.0, 0.0,
+                    float(self.kappa_max), 1.0]))
+            return
+
+        w_clamped = w_cmd
+        w_limited = 0.0
 
         if abs(v) > self.v_eps:
             # Nav2 RPP has no Ackermann limit — it can command |w| >> |v|*kappa_max when
             # correcting path error. Clamp omega so steer effort matches physical full lock.
             w_max = abs(v) * self.kappa_max
-            w = clamp(w, -w_max, w_max)
-            steer_log = clamp(math.atan(self.L * w / v) / self.max_steer, -1.0, 1.0)
+            w_clamped = clamp(w_cmd, -w_max, w_max)
+            if abs(w_clamped - w_cmd) > 1e-6:
+                w_limited = 1.0
+            steer_log = clamp(math.atan(self.L * w_clamped / v) / self.max_steer, -1.0, 1.0)
         else:
             steer_log = 0.0
 
         steer_trim = self._steer_trim(steer_log, v, now)
-        steer_log = clamp(steer_log + steer_trim)
+        steer_log_out = clamp(steer_log + steer_trim)
+        steer_log_out = self._hysteresis_comp(steer_log_out, now)
 
-        throttle_log = clamp(v / self.max_speed, -1.0, 1.0)
+        speed_scale = self.max_speed if v >= 0.0 else self.max_speed_rev
+        throttle_log = clamp(v / speed_scale, -1.0, 1.0)
         speed_trim = self._speed_trim(v, now) if self.closed_loop else 0.0
         throttle_log = clamp(throttle_log + speed_trim)
+        throttle_log = self._stiction_kick(throttle_log, v, now)
+        # Trims may only modulate toward neutral, never cross it: catching a
+        # reverse surge, kp*err railed the trim and FLIPPED the throttle sign —
+        # the ESC drove forward mid-reverse and every 3-point-turn leg restarted
+        # (2026-06-11 18:33 run, t=65: cmd -0.2, surge -0.62, eff_drive +0.53).
+        if v > 0.0:
+            throttle_log = max(0.0, throttle_log)
+        elif v < 0.0:
+            throttle_log = min(0.0, throttle_log)
 
-        steer = self._raw_steer(steer_log)
+        steer = self._raw_steer(steer_log_out)
         throttle = self._raw_throttle(throttle_log)
+        steer_sat = 1.0 if abs(steer_log_out) >= 0.98 else 0.0
 
         self.pub.publish(Float32MultiArray(data=[float(steer), float(throttle)]))
         if self.pub_debug is not None:
             self.pub_debug.publish(Float32MultiArray(data=[
                 float(speed_trim), float(steer_trim),
-                float(self.v_meas), float(self.w_meas)]))
+                float(self.v_meas), float(self.w_meas),
+                float(w_cmd), float(w_clamped), float(steer_log_out),
+                float(w_limited), float(steer_sat), float(self.kappa_max),
+                0.0,  # interlock flag (1.0 only in the interlock branch)
+            ]))
+
+    def _hysteresis_comp(self, steer, now):
+        """Backlash inverse + anti-stiction dither for the loaded steering.
+
+        Backlash inverse: the linkage has ~steer_backlash of slop; overdrive
+        by half of it in the current direction of travel so the WHEELS land
+        where the command says, not the servo horn. Dither: a small steering
+        oscillation keeps the contact patches from settling into static
+        friction (the gauge-tapping trick) so small corrections take effect.
+        """
+        if self.steer_backlash > 0.0:
+            if steer > self._steer_prev_des + 1e-4:
+                self._steer_dir = 1.0
+            elif steer < self._steer_prev_des - 1e-4:
+                self._steer_dir = -1.0
+            self._steer_prev_des = steer
+            steer = steer + 0.5 * self.steer_backlash * self._steer_dir
+        if self.steer_dither_amp > 0.0:
+            steer += self.steer_dither_amp * math.sin(
+                2.0 * math.pi * self.steer_dither_hz * (now / 1e9))
+        return clamp(steer)
+
+    def _stiction_kick(self, throttle_log, v_cmd, now):
+        """Ramp extra throttle while commanded to move but odom shows no motion."""
+        if not self.kick_enabled or abs(v_cmd) < 0.05 \
+                or (now - self.last_odom_ns) > self.odom_timeout_ns:
+            self._stall_since = None
+            self._kick = 0.0
+            return throttle_log
+        if abs(self.v_meas) >= self.kick_v_moving:
+            # Rolling: drop the kick INSTANTLY. The 0.2 s bleed-off kept boosting
+            # a drivetrain already past breakaway and fed the reverse surge that
+            # the speed PI then overcorrected (2026-06-11 18:33 run).
+            self._stall_since = None
+            self._kick = 0.0
+        else:
+            if self._stall_since is None:
+                self._stall_since = now
+            elif (now - self._stall_since) / 1e9 >= self.kick_delay_s:
+                self._kick = min(self.kick_max, self._kick + self.kick_rate * self.dt)
+        if self._kick <= 0.0:
+            return throttle_log
+        return clamp(throttle_log + math.copysign(self._kick, v_cmd))
 
     def _speed_trim(self, v_cmd, now):
         if abs(v_cmd) < 0.05 or (now - self.last_odom_ns) > self.odom_timeout_ns:

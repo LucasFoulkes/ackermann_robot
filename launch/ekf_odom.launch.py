@@ -40,20 +40,31 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_pointcloud", default_value=enable_pointcloud),
         # RTAB-Map ICP odometry (scan-to-map) replaces rf2o (scan-to-scan):
         # ~15% of a core at full 10 Hz, drifts less. publish_tf stays false —
-        # the EKF owns odom->base_link. Odom/ResetCountdown auto-recovers if
-        # ICP ever gets lost instead of staying dead.
+        # the EKF owns odom->base_link.
+        # NOTE: ResetCountdown 1 was a TRAP, not recovery — one failed
+        # registration triggered a reset, the reset left no motion guess, and
+        # rtabmap then loops forever on "cannot do registration with a null
+        # guess" (froze /odom_icp at 0,0 -> SLAM shoved map->odom to -32 m ->
+        # map expanded while the robot sat still; 2026-06-11 and 2026-06-13).
+        # Fix: ResetCountdown 0 (never auto-reset) + GuessMotion false (use an
+        # identity guess each frame instead of the previous motion). Identity is
+        # always valid, so the null-guess loop cannot form; fine for a 0.2 m/s
+        # robot (~2 cm between 10 Hz frames, well within ICP convergence).
         Node(
             package="rtabmap_odom",
             executable="icp_odometry",
             name="icp_odometry",
-            output="screen",
+            # "both": rtabmap logs via its own printf-style logger (ULogger),
+            # which bypasses rclcpp log files — the 2026-06-11 19:54 null-guess
+            # death left zero trace on disk. "both" tees it into launch.log.
+            output="both",
             parameters=[{
                 "frame_id": "base_link",
                 "odom_frame_id": "odom",
                 "publish_tf": False,
                 "qos_scan": 2,
                 "wait_for_transform": 0.2,
-                "args": "--Reg/Force3DoF true --Odom/ResetCountdown 1",
+                "args": "--Reg/Force3DoF true --Odom/ResetCountdown 0 --Odom/GuessMotion false",
             }],
             remappings=[("scan", "/scan"), ("odom", "/odom_icp")],
             arguments=["--ros-args", "--log-level", "icp_odometry:=warn"],

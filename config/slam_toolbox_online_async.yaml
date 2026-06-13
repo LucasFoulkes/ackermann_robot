@@ -30,18 +30,33 @@ slam_toolbox:
     # --- Motion thresholds (small robot, 10 Hz lidar -> keep modest) ---
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.10    # process after 10 cm
+    # 0.20 (was 0.10): 0.10 was 5x denser than slam_toolbox default (0.5) and a
+    # major share of the CPU spikes behind the scan-queue drops; still 2.5x
+    # denser than default, corridors gain nothing from tighter spacing.
+    minimum_travel_distance: 0.20
     minimum_travel_heading: 0.10     # or ~6 deg
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 12.0
     link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
-    loop_search_maximum_distance: 3.0
+    # ===== INDOOR PROFILE (twin parallel halls ~1.25 m apart) =====
+    # 1.0 (was 3.0): at 3.0 the loop-closure search spanned both halls and on
+    # 2026-06-11 it matched the wrong one — 1.25 m map teleport mid-drive, with
+    # everything mapped afterwards registered in the corrupted frame. 1.0 keeps
+    # the wrong hall out of the candidate set; EKF+ICP drift on this small site
+    # stays well under 1 m between revisits, so real closures still fire.
+    # FARM / LARGE-SITE PROFILE: restore 3.0+ (big loops accumulate >1 m drift
+    # and must close) — and plan GPS/RTK fusion as the global anchor; crop rows
+    # are this same ambiguity at scale and SLAM tuning alone will not save it.
+    loop_search_maximum_distance: 1.0
     do_loop_closing: true
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
     loop_match_minimum_response_coarse: 0.35
-    loop_match_minimum_response_fine: 0.45
+    # 0.55 (was 0.45): stricter acceptance. Weak defense alone (identical halls
+    # produce high-scoring wrong matches) but cheap belt-and-braces with the
+    # radius cap above.
+    loop_match_minimum_response_fine: 0.55
 
     # --- Correlation ---
     correlation_search_space_dimension: 0.5
@@ -52,7 +67,10 @@ slam_toolbox:
     loop_search_space_smear_deviation: 0.03
 
     # --- Scan matcher penalties ---
-    distance_variance_penalty: 0.5
+    # 0.8 (was 0.5): penalize matches that stray from the odom prior harder —
+    # the EKF (ICP+gyro) held a smooth 0.33 m/s through the hall teleport, so
+    # continuity from odometry deserves more weight than the default gives it.
+    distance_variance_penalty: 0.8
     angle_variance_penalty: 1.0
     fine_search_angle_offset: 0.00349
     coarse_search_angle_offset: 0.349

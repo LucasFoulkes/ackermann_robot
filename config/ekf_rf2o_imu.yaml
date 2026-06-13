@@ -2,8 +2,16 @@
 # Starting-point covariances; tune while driving (PlotJuggler: /odom_rf2o vs /odom).
 #
 # Fusion split (2D Ackermann):
-#   odom_rf2o  -> x, y, yaw, vx
+#   odom_icp   -> x, y, yaw, vx
 #   imu/data   -> vyaw only (gyro z); no mag, no absolute yaw from IMU
+#
+# BOTH yaw sources fused on purpose — they correct each other (proven by the
+# 2026-06-12 13:10 vs evening runs): gyro vyaw has a rate bias that runs away
+# if it's the only yaw source (net yaw -947 vs -127 real); ICP yaw drags at
+# standstill if IT's alone (11-22 deg parked). Fused: 0.3 deg standstill drift
+# AND net yaw matches SLAM. Do NOT disable either half. The "2 Motion Module
+# failure" lines at camera startup are a benign D435i quirk (present in dozens
+# of healthy runs incl. 13:10), NOT a reason to drop the gyro.
 
 ekf_filter_node:
   ros__parameters:
@@ -21,7 +29,7 @@ ekf_filter_node:
 
     use_control: false
 
-    # --- RF2O (remapped to /odom_rf2o in odom_fusion_experiment.launch.py) ---
+    # --- ICP laser odometry: x, y, yaw, vx (see fusion-split note at top) ---
     odom0: /odom_icp
     odom0_config: [true,  true,  false,
                    false, false, true,
@@ -34,6 +42,8 @@ ekf_filter_node:
     odom0_relative: false
 
     # --- Throttled Madgwick output (see imu_throttle.py; do not feed 200 Hz IMU here) ---
+    # vyaw fused (gyro z rate) — corrects ICP yaw drag at standstill; ICP yaw
+    # corrects gyro bias. See fusion-split note at top.
     imu0: /imu/data_ekf
     imu0_config: [false, false, false,
                   false, false, false,

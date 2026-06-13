@@ -28,11 +28,13 @@ def _launch_setup(context, *args, **kwargs):
     driver_yaml = os.path.join(pkg, "config", "ackermann_driver.yaml")
     floor_scan_yaml = os.path.join(pkg, "config", "depth_floor_scan.yaml")
     stuck_yaml = os.path.join(pkg, "config", "stuck_monitor.yaml")
+    speckle_yaml = os.path.join(pkg, "config", "scan_speckle_filter.yaml")
 
     use_ekf = LaunchConfiguration("use_ekf").perform(context) == "true"
     use_imu = LaunchConfiguration("use_imu").perform(context) == "true"
     use_floor_scan = LaunchConfiguration("use_floor_scan").perform(context) == "true"
     depth_on = "true" if use_floor_scan else "false"
+    color_on = LaunchConfiguration("enable_color").perform(context)
 
     serial_port = LaunchConfiguration("serial_port")
     closed_loop = LaunchConfiguration("closed_loop")
@@ -50,14 +52,29 @@ def _launch_setup(context, *args, **kwargs):
 
     actions = []
     slam_params = os.path.join(pkg, "config", "slam_toolbox_online_async.yaml")
-    slam_hz = 8.0
+    # 5 Hz (was 8): slam_toolbox gates by minimum_travel_distance anyway, and the
+    # extra scans just piled up in its TF message filter during CPU spikes —
+    # "queue is full" drops loosened the matcher prior right before the
+    # 2026-06-11 parallel-hall teleport. 5 Hz still gives a scan every ~6 cm.
+    slam_hz = 5.0
     # SLAM-only throttle; rf2o + local costmap keep full /scan.
     actions.append(Node(
         package="ackermann_robot",
         executable="scan_throttle",
         name="scan_throttle",
         output="screen",
-        parameters=[{"hz": slam_hz, "in_topic": "/scan", "out_topic": "/scan_slam"}],
+        parameters=[{"hz": slam_hz, "in_topic": "/scan", "out_topic": "/scan_slam_pre"}],
+    ))
+    # Speckle filter on the SLAM feed only: isolated phantom returns were
+    # getting baked into the map as permanent freckles. Costmaps (DenoiseLayer)
+    # and ICP odometry keep the raw /scan.
+    actions.append(Node(
+        package="laser_filters",
+        executable="scan_to_scan_filter_chain",
+        name="scan_speckle_filter",
+        output="screen",
+        parameters=[speckle_yaml],
+        remappings=[("scan", "/scan_slam_pre"), ("scan_filtered", "/scan_slam")],
     ))
     if log_stats:
         actions.append(Node(
@@ -102,7 +119,7 @@ def _launch_setup(context, *args, **kwargs):
             [
                 ("use_imu", "true" if use_imu else "false"),
                 ("enable_depth", depth_on),
-                ("enable_color", "false"),  # floor scan uses xyz only; color = pure CPU
+                ("enable_color", color_on),  # 424x240x15 (see d435i.launch.py); floor scan itself is xyz-only
                 ("enable_pointcloud", depth_on),
             ],
         ))
@@ -112,7 +129,7 @@ def _launch_setup(context, *args, **kwargs):
     if use_floor_scan and not use_imu:
         actions.append(include("d435i.launch.py", [
             ("enable_depth", "true"),
-            ("enable_color", "false"),
+            ("enable_color", color_on),
             ("enable_pointcloud", "true"),
         ]))
     if use_floor_scan:
@@ -201,9 +218,14 @@ def generate_launch_description():
             "use_floor_scan", default_value="true",
             description="D435i depth RANSAC -> /camera/scan for local costmap",
         ),
-        DeclareLaunchArgument("log_system_stats", default_value="false"),
-        DeclareLaunchArgument("log_tf_health", default_value="false"),
-        DeclareLaunchArgument("log_twist", default_value="false",
+        # Default on: 5 s CPU/mem/temp samples are cheap and we keep needing them
+        # to decide where to spend Pi headroom (see 2026-06-11 tuning).
+        DeclareLaunchArgument("enable_color", default_value="true",
+                              description="D435i RGB stream (424x240x15, ~5-10%% core); "
+                                          "set false to reclaim CPU"),
+        DeclareLaunchArgument("log_system_stats", default_value="true"),
+        DeclareLaunchArgument("log_tf_health", default_value="true"),
+        DeclareLaunchArgument("log_twist", default_value="true",
                               description="CSV: cmd vs odom twist + effort to ~/ros2_ws/logs"),
         DeclareLaunchArgument("log_stuck", default_value="true",
                               description="cmd vs odom stall detector -> /robot_stuck"),
