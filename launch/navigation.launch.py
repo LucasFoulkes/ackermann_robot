@@ -33,8 +33,16 @@ def _launch_setup(context, *args, **kwargs):
     use_imu = LaunchConfiguration("use_imu").perform(context) == "true"
     fuse_imu = LaunchConfiguration("fuse_imu").perform(context)  # "true"/"false" -> EKF imu A/B
     use_floor_scan = LaunchConfiguration("use_floor_scan").perform(context) == "true"
-    depth_on = "true" if use_floor_scan else "false"
-    color_on = LaunchConfiguration("enable_color").perform(context)
+    # slam backend: "slam_toolbox" (default, 2D lidar loop closure) or "rtabmap"
+    # (visual loop closure via the camera — disambiguates look-alike corridors).
+    slam_mode = LaunchConfiguration("slam").perform(context)
+    use_rtabmap = slam_mode == "rtabmap"
+    # Camera streams: rtabmap needs depth + color + aligned depth for RGB-D loop
+    # closure; the floor scan needs depth + pointcloud (raw cloud, no alignment).
+    depth_on = "true" if (use_floor_scan or use_rtabmap) else "false"
+    pc_on = "true" if use_floor_scan else "false"   # realsense pointcloud: floor scan only
+    align_on = "true" if use_rtabmap else "false"   # depth->color registration: rtabmap only
+    color_on = "true" if use_rtabmap else LaunchConfiguration("enable_color").perform(context)
 
     serial_port = LaunchConfiguration("serial_port")
     closed_loop = LaunchConfiguration("closed_loop")
@@ -93,8 +101,9 @@ def _launch_setup(context, *args, **kwargs):
                 ("use_imu", "true" if use_imu else "false"),
                 ("fuse_imu", fuse_imu),
                 ("enable_depth", depth_on),
-                ("enable_color", color_on),  # 424x240x15 (see d435i.launch.py); floor scan itself is xyz-only
-                ("enable_pointcloud", depth_on),
+                ("enable_color", color_on),
+                ("enable_pointcloud", pc_on),
+                ("enable_align_depth", align_on),
             ],
         ))
     else:
@@ -116,7 +125,13 @@ def _launch_setup(context, *args, **kwargs):
             respawn=True,
             respawn_delay=2.0,
         ))
-    actions.append(include("slam.launch.py", [("slam_params_file", slam_params)]))
+    # SLAM backend: rtabmap (visual loop closure) OR slam_toolbox (2D lidar).
+    # Exactly one — both publish map->odom and would fight. rtabmap reuses the
+    # speckle-filtered /scan_slam for its grid + the EKF /odom for odometry.
+    if use_rtabmap:
+        actions.append(include("rtabmap.launch.py"))
+    else:
+        actions.append(include("slam.launch.py", [("slam_params_file", slam_params)]))
     actions.extend([
         Node(
             package="ackermann_robot",
@@ -193,6 +208,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "use_floor_scan", default_value="true",
             description="D435i depth RANSAC -> /camera/scan for local costmap",
+        ),
+        DeclareLaunchArgument(
+            "slam", default_value="slam_toolbox",
+            description="SLAM backend: slam_toolbox (2D lidar) or rtabmap (visual loop closure)",
         ),
         # Default on: 5 s CPU/mem/temp samples are cheap and we keep needing them
         # to decide where to spend Pi headroom (see 2026-06-11 tuning).

@@ -29,6 +29,7 @@ def generate_launch_description():
     enable_depth = LaunchConfiguration("enable_depth", default="false")
     enable_color = LaunchConfiguration("enable_color", default="false")
     enable_pointcloud = LaunchConfiguration("enable_pointcloud", default="false")
+    enable_align_depth = LaunchConfiguration("enable_align_depth", default="false")  # rtabmap RGB-D
 
     def include(name, launch_arguments=None, condition=None):
         return IncludeLaunchDescription(
@@ -44,6 +45,7 @@ def generate_launch_description():
                               description="D435i depth (true when use_floor_scan)"),
         DeclareLaunchArgument("enable_color", default_value=enable_color),
         DeclareLaunchArgument("enable_pointcloud", default_value=enable_pointcloud),
+        DeclareLaunchArgument("enable_align_depth", default_value=enable_align_depth),
         # RTAB-Map ICP odometry (scan-to-map) replaces rf2o (scan-to-scan):
         # ~15% of a core at full 10 Hz, drifts less. publish_tf stays false —
         # the EKF owns odom->base_link.
@@ -101,6 +103,7 @@ def generate_launch_description():
             ("enable_depth", enable_depth),
             ("enable_color", enable_color),
             ("enable_pointcloud", enable_pointcloud),
+            ("enable_align_depth", enable_align_depth),
         ]),
         # C++ throttle (topic_tools): same 200->30 Hz job as the old Python
         # imu_throttle node but ~40% of a core cheaper (no per-message

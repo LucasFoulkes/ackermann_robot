@@ -1,0 +1,68 @@
+# RTAB-Map graph SLAM — REPLACES slam_toolbox (owns /map + map->odom + loop closure).
+#
+# Why rtabmap instead of slam_toolbox: slam_toolbox's loop closure is purely 2D
+# lidar scan-matching, which can't tell two geometrically-identical corridors
+# apart -> the 2026-06-11 parallel-hall teleport (and the farm crop-row problem).
+# rtabmap detects loop closures by VISUAL appearance (bag-of-words on the RGB
+# image), so look-alike halls are disambiguated by what they actually look like.
+#
+# Division of labour (minimal cost):
+#   lidar  -> odometry (icp_odometry, unchanged) + occupancy grid (Grid/FromDepth false)
+#   camera -> ONLY visual loop closure, at Rtabmap/DetectionRate (1 Hz), decimated
+#   /odom  -> EKF fused odom (ICP + gyro), reused as rtabmap's odometry input
+#
+# Tuning is live (config is symlinked): restart the service to apply.
+
+rtabmap:
+  ros__parameters:
+    frame_id: base_link
+    odom_frame_id: odom
+    map_frame_id: map
+    publish_tf: true            # rtabmap owns map->odom (slam_toolbox is OFF in this mode)
+
+    # Inputs: RGB-D (depth aligned to color) for loop closure + 2D lidar for the grid.
+    subscribe_depth: true       # rgb/image + depth/image + rgb/camera_info (synced internally)
+    subscribe_rgbd: false
+    subscribe_scan: true        # /scan_slam -> occupancy grid + proximity loop closures
+    approx_sync: true           # camera, scan, odom arrive at different rates
+    wait_for_transform: 0.2
+    qos_scan: 2                 # best-effort (matches the lidar pub)
+    qos_image: 2
+    qos_camera_info: 2
+    sync_queue_size: 10
+
+    # --- core rtabmap params (strings: the ROS wrapper parses them) ---
+    # The big CPU lever: process only ~1 keyframe/sec for loop closure regardless
+    # of camera rate. Drop to 0.5 if CPU is tight; raise for faster re-localization.
+    Rtabmap/DetectionRate: "1.0"
+
+    # 2D Ackermann: keep the graph and grid flat.
+    Reg/Force3DoF: "true"
+    Optimizer/Slam2D: "true"
+
+    # Occupancy grid from the LIDAR, not the depth cloud — cheaper and a cleaner
+    # 2D map (depth projection adds noise + CPU). 5 cm cells match the costmap.
+    Grid/FromDepth: "false"
+    Grid/CellSize: "0.05"
+    Grid/RangeMax: "8.0"
+    Grid/RayTracing: "true"
+
+    # Loop closure registration = visual (uses the camera features). VisIcp ("2")
+    # is more robust (refines with the scan) but costs more — switch to "2" if
+    # corridors still drift. Proximity-by-space adds lidar-geometry loop closures.
+    Reg/Strategy: "0"
+    RGBD/ProximityBySpace: "true"
+    RGBD/OptimizeFromGraphEnd: "false"
+
+    # Only add a graph node after real motion -> bounds memory + CPU on long runs.
+    RGBD/LinearUpdate: "0.1"
+    RGBD/AngularUpdate: "0.1"
+
+    # Decimate images before feature extraction (halve resolution work each stage),
+    # and bound feature counts. Plenty for loop-closure recognition at low res.
+    Mem/ImagePreDecimation: "2"
+    Mem/ImagePostDecimation: "2"
+    Kp/MaxFeatures: "400"
+    Vis/MaxFeatures: "500"
+
+    Mem/IncrementalMemory: "true"   # SLAM (mapping). Set false + keep the .db for localization-only later.

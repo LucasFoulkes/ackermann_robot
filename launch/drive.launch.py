@@ -53,6 +53,7 @@ def generate_launch_description():
     use_floor_scan = LaunchConfiguration("use_floor_scan", default="false")
     # Color unused while floor scan is off (floor scan was xyz-only anyway); off saves a few % core.
     enable_color = LaunchConfiguration("enable_color", default="false")
+    slam = LaunchConfiguration("slam", default="slam_toolbox")  # or rtabmap (visual loop closure)
     log_csv = LaunchConfiguration("log_csv", default="true")
 
     return LaunchDescription([
@@ -70,6 +71,8 @@ def generate_launch_description():
                               description="D435i RANSAC -> /camera/scan in local costmap"),
         DeclareLaunchArgument("enable_color", default_value=enable_color,
                               description="D435i RGB image (low-res); false saves CPU"),
+        DeclareLaunchArgument("slam", default_value=slam,
+                              description="SLAM backend: slam_toolbox (2D lidar) or rtabmap (visual loop closure)"),
         DeclareLaunchArgument("log_csv", default_value=log_csv,
                               description="Single drive CSV log (twist, turn limits, pose) -> ~/ros2_ws/logs"),
         Node(
@@ -89,6 +92,7 @@ def generate_launch_description():
                 "fuse_imu": fuse_imu,
                 "use_floor_scan": use_floor_scan,
                 "enable_color": enable_color,
+                "slam": slam,
             }.items(),
         ),
     ])

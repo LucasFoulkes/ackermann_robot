@@ -37,6 +37,12 @@ def generate_launch_description():
     enable_depth = LaunchConfiguration("enable_depth", default="false")
     enable_color = LaunchConfiguration("enable_color", default="false")
     enable_pointcloud = LaunchConfiguration("enable_pointcloud", default="false")
+    # align_depth registers the depth image into the COLOR frame -> required for
+    # rtabmap RGB-D loop closure (it needs depth + color pixel-aligned to compute
+    # the 3D position of visual features). The floor scan does NOT need it (it uses
+    # the raw pointcloud), so it's off by default; navigation turns it on for
+    # slam:=rtabmap. This registration is the main camera CPU adder, light at 424x240.
+    enable_align_depth = LaunchConfiguration("enable_align_depth", default="false")
 
     realsense = Node(
         package="realsense2_camera",
@@ -58,9 +64,12 @@ def generate_launch_description():
             # 640x480x15 (~4x the pixels at 2.5x the rate), quietly inflating CPU.
             "depth_module.depth_profile": "480x270x6",
             # Low color res/rate for the same reason: enough for a teleop/monitor
-            # view, cheap on USB + CPU. Compressed transport only costs CPU
+            # view AND for rtabmap loop closure (which subsamples to ~1 Hz and
+            # decimates), cheap on USB + CPU. 6 fps is the floor that pairs with
+            # the 480x270x6 depth stream. Compressed transport only costs CPU
             # while something actually subscribes.
-            "rgb_camera.color_profile": "424x240x15",
+            "rgb_camera.color_profile": "424x240x6",
+            "align_depth.enable": ParameterValue(enable_align_depth, value_type=bool),
             "enable_gyro": True,
             "enable_accel": True,
             # 0-None, 1-copy, 2-linear_interpolation. 2 = one fused imu topic.
@@ -110,6 +119,7 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_depth", default_value=enable_depth),
         DeclareLaunchArgument("enable_color", default_value=enable_color),
         DeclareLaunchArgument("enable_pointcloud", default_value=enable_pointcloud),
+        DeclareLaunchArgument("enable_align_depth", default_value=enable_align_depth),
         realsense,
         madgwick,
     ])
