@@ -87,6 +87,12 @@ class CmdVelToEffort(Node):
         # old sign >1 s after every cmd_v flip). Hold neutral until nearly stopped.
         self.interlock = bool(p("direction_interlock", True))
         self.interlock_v_stop = float(p("interlock_v_stop", 0.05))
+        # ICP odometry over-reports linear speed during rotation (2026-06-13:
+        # odom_v ~0.45 turning vs ~0.14 straight on a 0.20 cmd). That phantom
+        # speed made the speed PI cut throttle to 0 mid-turn -> robot stalls in
+        # corners and drifts during the steering lag. Above this yaw rate, hold
+        # the speed trim and run feedforward only (cmd->throttle), which is right.
+        self.speed_yaw_gate = float(p("speed_trim_yaw_gate", 0.15))
 
         # --- stiction kick ---
         # Breakaway throttle is higher than keep-rolling throttle, and the
@@ -289,6 +295,10 @@ class CmdVelToEffort(Node):
     def _speed_trim(self, v_cmd, now):
         if abs(v_cmd) < 0.05 or (now - self.last_odom_ns) > self.odom_timeout_ns:
             self.integral = 0.0
+            return 0.0
+        # Turning: odom_v is phantom-inflated by ICP rotation coupling, so the
+        # error is garbage -> freeze the integral and run feedforward only.
+        if abs(self.w_meas) > self.speed_yaw_gate:
             return 0.0
         err = v_cmd - self.v_meas
         self.integral = clamp(self.integral + err * self.dt, -0.3, 0.3)

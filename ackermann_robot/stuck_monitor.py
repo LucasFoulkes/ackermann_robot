@@ -39,6 +39,11 @@ class StuckMonitor(Node):
         self.cmd_min_v = float(p("cmd_min_linear", 0.06))
         self.cmd_min_w = float(p("cmd_min_angular", 0.20))
         self.odom_min_v = float(p("odom_min_linear", 0.025))
+        # A turning robot is making progress, not stuck. Entering a hard turn the
+        # steering lag drops linear speed to near 0 for ~1-2 s while the robot
+        # still rotates -> was false-flagged stuck -> needless cancel+escape
+        # mid-path (2026-06-14). Count yaw rate above this as motion.
+        self.odom_min_w = float(p("odom_min_yaw", 0.10))
         self.min_displacement = float(p("min_displacement_m", 0.04))
         self.stuck_time_s = float(p("stuck_time_s", 2.5))
         # Act on stuck, not just report: cancel the nav goal after this many
@@ -70,6 +75,7 @@ class StuckMonitor(Node):
         self.cmd_v = 0.0
         self.cmd_w = 0.0
         self.odom_v = 0.0
+        self.odom_w = 0.0
         self.pose = None
         self.cmd_active_since = None
         self.window_start = None
@@ -109,6 +115,7 @@ class StuckMonitor(Node):
 
     def _on_odom(self, msg: Odometry):
         self.odom_v = msg.twist.twist.linear.x
+        self.odom_w = msg.twist.twist.angular.z
         p = msg.pose.pose.position
         self.pose = (p.x, p.y)
 
@@ -155,7 +162,9 @@ class StuckMonitor(Node):
 
         elapsed = (now - self.window_start).nanoseconds / 1e9
         disp = self._displacement(self.window_start_pose)
-        moving = abs(self.odom_v) >= self.odom_min_v or disp >= self.min_displacement
+        moving = (abs(self.odom_v) >= self.odom_min_v
+                  or abs(self.odom_w) >= self.odom_min_w  # turning = progress
+                  or disp >= self.min_displacement)
 
         if moving:
             self.window_start = now

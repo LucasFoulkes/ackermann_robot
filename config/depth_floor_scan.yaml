@@ -1,10 +1,21 @@
 depth_floor_scan:
   ros__parameters:
+    # gravity = IMU-leveled base_link z-threshold (default; replaced the RANSAC
+    # plane search that was ~42% of a core / the #1 CPU hog, 2026-06-13).
+    # Set method: ransac to fall back to the old plane-fit.
+    method: "gravity"
+    floor_percentile: 5.0     # low pctile of base_link z taken as floor level
+    # Generous sanity band (just catches grossly-bad TF / flipped robot); the
+    # exact base_link height above ground is unknown, so don't gate it tight or
+    # a valid floor gets rejected and obstacles silently vanish.
+    floor_z_min: -0.30
+    floor_z_max: 0.15
     cloud_topic: "/camera/camera/depth/color/points"
     scan_topic: "/camera/scan"
     # base_link: stable TF for Nav2 local costmap (odom -> base_link from EKF).
     scan_frame: "base_link"
     process_hz: 8.0
+    # --- RANSAC fallback params (unused when method: gravity) ---
     ransac_distance: 0.02
     ransac_iterations: 40
     min_floor_inliers: 600

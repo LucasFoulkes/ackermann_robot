@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""Depth -> floor-free LaserScan via RANSAC ground-plane segmentation.
+"""Depth -> floor-free LaserScan, gravity-aligned (default) or RANSAC fallback.
 
-Subscribes to the D435i organized point cloud, fits the floor with RANSAC, and
-publishes obstacle points in a height band as a LaserScan in base_link so Nav2's
-local costmap can use the stable odom->base_link TF chain.
+GRAVITY method (default, ~5-10x cheaper than RANSAC, the 2026-06-13 CPU fix):
+  base_link is held level by the IMU-fed EKF (two_d_mode), and base_link->camera
+  is a static URDF TF -- so transforming the cloud into base_link makes "height
+  above floor" simply the z coordinate. Floor height is the low percentile of z
+  (O(n)); obstacles are the [min_h, max_h] band above it. No plane SEARCH, and it
+  can't be fooled into locking onto a wall/ramp the way RANSAC can.
+  This works precisely because we HAVE a fused IMU; most RealSense pipelines
+  don't, which is why they fall back to RANSAC.
+
+RANSAC method (method:=ransac): the original plane-fit, kept as a fallback.
+
+Either way, obstacle points in a height band are published as a LaserScan in
+base_link so Nav2's local costmap uses the stable odom->base_link TF chain.
 """
 import math
 
@@ -68,6 +78,7 @@ class DepthFloorScan(Node):
         super().__init__("depth_floor_scan")
         p = lambda n, d: self.declare_parameter(n, d).value
 
+        self.method = str(p("method", "gravity")).lower()  # "gravity" | "ransac"
         self.cloud_topic = p("cloud_topic", "/camera/camera/depth/color/points")
         self.scan_frame = p("scan_frame", "base_link")
         self.max_points = int(p("max_points", 7000))
@@ -76,6 +87,11 @@ class DepthFloorScan(Node):
         self.min_inliers = int(p("min_floor_inliers", 600))
         self.floor_seed_min_y = float(p("floor_seed_min_y", 0.05))
         self.floor_seed_min_z = float(p("floor_seed_min_z", 0.20))
+        # GRAVITY method: floor z = this percentile of base_link z (robust to a
+        # few stray low points); sanity-gate the estimate to a plausible band.
+        self.floor_pctile = float(p("floor_percentile", 5.0))
+        self.floor_z_min = float(p("floor_z_min", -0.10))
+        self.floor_z_max = float(p("floor_z_max", 0.10))
         self.min_h = float(p("min_obstacle_height", 0.06))
         self.max_h = float(p("max_obstacle_height", 0.195))
         self.angle_min = float(p("angle_min", -1.0))
@@ -168,6 +184,36 @@ class DepthFloorScan(Node):
         else:
             sample = xyz
 
+        if self.method == "gravity":
+            self._process_gravity(msg, sample)
+        else:
+            self._process_ransac(msg, sample)
+
+    def _process_gravity(self, msg, sample):
+        """Transform cloud into level base_link; floor = low-percentile z; obstacles
+        = [min_h, max_h] above it. No plane search (the CPU win)."""
+        body_all = self._to_scan_frame(sample, msg.header.frame_id)
+        if body_all is None:
+            return
+        z = body_all[:, 2]
+        floor_z = float(np.percentile(z, self.floor_pctile))
+        if not (self.floor_z_min <= floor_z <= self.floor_z_max):
+            self.get_logger().warn(
+                f"gravity: floor z {floor_z:.3f} m outside [{self.floor_z_min}, "
+                f"{self.floor_z_max}] -- bad TF or robot tilted; skipping",
+                throttle_duration_sec=2.0)
+            self._publish_empty()
+            return
+        self.pub_dist.publish(Float32(data=float(-floor_z)))
+        self.pub_tilt.publish(Vector3(x=0.0, y=0.0, z=0.0))  # base_link is leveled
+        self.get_logger().info(
+            f"floor(grav): z={floor_z:.3f} m, {sample.shape[0]} pts",
+            throttle_duration_sec=2.0)
+        haf = z - floor_z
+        body = body_all[(haf >= self.min_h) & (haf <= self.max_h)]
+        self._emit_scan(msg, body)
+
+    def _process_ransac(self, msg, sample):
         fit = ransac_ground(self._floor_ransac_sample(sample), self.iters, self.thresh, self.rng)
         if fit is None or int(fit[2].sum()) < self.min_inliers:
             self.get_logger().warn("no floor plane found", throttle_duration_sec=2.0)
@@ -198,19 +244,24 @@ class DepthFloorScan(Node):
             throttle_duration_sec=1.0,
         )
 
-        haf = xyz @ n + d
-        obst = xyz[(haf >= self.min_h) & (haf <= self.max_h)]
+        haf = sample @ n + d
+        obst = sample[(haf >= self.min_h) & (haf <= self.max_h)]
+        body = self._to_scan_frame(obst, msg.header.frame_id) if obst.shape[0] else \
+            np.empty((0, 3))
+        if obst.shape[0] and body is None:
+            return
+        self._emit_scan(msg, body)
+
+    def _emit_scan(self, msg, body):
+        """Project base_link-frame obstacle points to a LaserScan and publish.
+        body: Nx3 points already in scan_frame (base_link). Shared by both methods."""
         # Stamp the scan with the cloud's CAPTURE time, not processing time, so the
         # costmap can time-correct it (camera->base_link is static, so transforming
         # the points at latest TF is still valid). Using 'now' made stale obstacles
         # look current on a moving robot -> ghosts.
         now = msg.header.stamp
-        if obst.shape[0] == 0:
+        if body is None or body.shape[0] == 0:
             self._publish_scan(now, np.full(self.n_bins, np.inf))
-            return
-
-        body = self._to_scan_frame(obst, msg.header.frame_id)
-        if body is None:
             return
 
         xy = body[:, :2]

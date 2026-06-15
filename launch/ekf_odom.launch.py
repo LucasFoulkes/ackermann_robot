@@ -11,7 +11,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -20,6 +20,12 @@ def generate_launch_description():
     launch_dir = os.path.join(pkg, "launch")
     ekf_params = os.path.join(pkg, "config", "ekf_rf2o_imu.yaml")
     use_imu = LaunchConfiguration("use_imu", default="true")
+    # A/B toggle: when false, point the EKF's imu0 at a dead topic so it fuses
+    # ICP odometry ONLY (camera/IMU hardware still run). Lets us measure the
+    # IMU's contribution to odometry without breaking icp (which needs the camera).
+    fuse_imu = LaunchConfiguration("fuse_imu", default="true")
+    imu0_topic = PythonExpression(
+        ["'/imu/data_ekf' if '", fuse_imu, "' == 'true' else '/imu/_off'"])
     enable_depth = LaunchConfiguration("enable_depth", default="false")
     enable_color = LaunchConfiguration("enable_color", default="false")
     enable_pointcloud = LaunchConfiguration("enable_pointcloud", default="false")
@@ -41,15 +47,22 @@ def generate_launch_description():
         # RTAB-Map ICP odometry (scan-to-map) replaces rf2o (scan-to-scan):
         # ~15% of a core at full 10 Hz, drifts less. publish_tf stays false —
         # the EKF owns odom->base_link.
-        # NOTE: ResetCountdown 1 was a TRAP, not recovery — one failed
-        # registration triggered a reset, the reset left no motion guess, and
-        # rtabmap then loops forever on "cannot do registration with a null
-        # guess" (froze /odom_icp at 0,0 -> SLAM shoved map->odom to -32 m ->
-        # map expanded while the robot sat still; 2026-06-11 and 2026-06-13).
-        # Fix: ResetCountdown 0 (never auto-reset) + GuessMotion false (use an
-        # identity guess each frame instead of the previous motion). Identity is
-        # always valid, so the null-guess loop cannot form; fine for a 0.2 m/s
-        # robot (~2 cm between 10 Hz frames, well within ICP convergence).
+        # NOTE: ResetCountdown 1 was a TRAP — one failed registration reset the
+        # odom, leaving no motion guess, then rtabmap looped on "null guess"
+        # (froze /odom_icp -> SLAM shoved map->odom to -32 m; 2026-06-11/13).
+        # Fix is ResetCountdown 0 (never auto-reset) ALONE: with no resets the
+        # previous-motion guess is always available, so the null-guess loop can't
+        # form.
+        # IMU-into-ICP ABANDONED (2026-06-13): tried feeding the gyro to icp to
+        # fix phantom linear velocity in turns. Three failures in a row -- silent
+        # no-op (wait_imu_to_init false), buffering latency (throttled imu), then
+        # full-rate imu DID subscribe with no buffering BUT odom_v was no better
+        # (0.30 straight / 0.52 turning vs cmd 0.20 -- if anything worse). The
+        # phantom velocity is NOT an ICP-guess problem; needs proper calibration
+        # (real speed vs odom) before more changes. Reverted to the simple stable
+        # config: ResetCountdown 0 (no null-guess), GuessMotion default, no IMU.
+        # The speed-PI yaw gate in cmd_vel_to_effort handles the throttle-cut
+        # symptom downstream.
         Node(
             package="rtabmap_odom",
             executable="icp_odometry",
@@ -64,7 +77,22 @@ def generate_launch_description():
                 "publish_tf": False,
                 "qos_scan": 2,
                 "wait_for_transform": 0.2,
-                "args": "--Reg/Force3DoF true --Odom/ResetCountdown 0 --Odom/GuessMotion false",
+                # DESKEW EXPERIMENT REVERTED (2026-06-14): feeding the IMU to icp
+                # with deskewing improved jitter (0.060 -> 0.039) BUT motion
+                # collapsed -- odom_v 0.31 -> 0.15, 30%% fully stuck at high
+                # throttle. Same IMU-into-icp area that's bitten us repeatedly.
+                # Back to Kalman-only odom (moves fine). Re-try deskew later as a
+                # careful standalone test (suspect: IMU integration corrupting the
+                # velocity estimate, or icp stalling on deskew compute).
+                # FilteringStrategy 1 = Kalman filter on the odom velocity output:
+                # ICP scan-match gives a slightly different displacement each frame
+                # -> ~30%% velocity jitter (odom_v ±0.12 on 0.42, odom_w sign-flips
+                # going straight, 2026-06-14). The Kalman smooths it before the
+                # robot_localization EKF. KalmanMeasurementNoise up from default
+                # 0.01 -> 0.05 trusts the motion model a bit more (more smoothing);
+                # lower it if odom feels laggy.
+                "args": ("--Reg/Force3DoF true --Odom/ResetCountdown 0 "
+                         "--Odom/FilteringStrategy 1 --Odom/KalmanMeasurementNoise 0.1"),
             }],
             remappings=[("scan", "/scan"), ("odom", "/odom_icp")],
             arguments=["--ros-args", "--log-level", "icp_odometry:=warn"],
@@ -90,7 +118,7 @@ def generate_launch_description():
             executable="ekf_node",
             name="ekf_filter_node",
             output="screen",
-            parameters=[ekf_params],
+            parameters=[ekf_params, {"imu0": imu0_topic}],
             remappings=[("odometry/filtered", "/odom")],
         ),
     ])

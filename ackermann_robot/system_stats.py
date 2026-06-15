@@ -52,6 +52,19 @@ def _mem_used_percent() -> float:
     return 100.0 * (1.0 - avail_kib / total_kib)
 
 
+def _net_bytes(iface: str) -> tuple[int, int]:
+    """Cumulative (rx_bytes, tx_bytes) for an interface from /proc/net/dev."""
+    try:
+        with open("/proc/net/dev", encoding="ascii") as f:
+            for line in f:
+                if line.lstrip().startswith(iface + ":"):
+                    fields = line.split(":", 1)[1].split()
+                    return int(fields[0]), int(fields[8])  # rx_bytes, tx_bytes
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0, 0
+
+
 def _cpu_percent(interval_s: float) -> float:
     def snap() -> tuple[int, int]:
         with open("/proc/stat", encoding="ascii") as f:
@@ -130,6 +143,11 @@ class SystemStats(Node):
         period = float(self.declare_parameter("period_s", 5.0).value)
         period = max(2.0, period)
         self._cpu_sample = min(1.0, period * 0.2)
+        # WiFi interface to report tx/rx bandwidth (the data going to the laptop;
+        # high tx = the cause of choppy RViz over wifi). tx is what RViz receives.
+        self._net_iface = str(self.declare_parameter("net_iface", "wlan0").value)
+        self._net_prev = _net_bytes(self._net_iface)
+        self._net_prev_t = time.monotonic()
         self.create_timer(period, self._tick)
         self.get_logger().info(
             f"system_stats: logging load/cpu/mem every {period:.0f}s "
@@ -149,9 +167,16 @@ class SystemStats(Node):
                     temp_c = f", temp={int(f.read()) / 1000:.0f}C"
             except OSError:
                 pass
+        rx, tx = _net_bytes(self._net_iface)
+        now = time.monotonic()
+        dt = max(1e-3, now - self._net_prev_t)
+        rx_mbps = 8.0 * (rx - self._net_prev[0]) / dt / 1e6
+        tx_mbps = 8.0 * (tx - self._net_prev[1]) / dt / 1e6
+        self._net_prev, self._net_prev_t = (rx, tx), now
+        net = f" | {self._net_iface} tx={tx_mbps:.1f} rx={rx_mbps:.1f} Mbps"
         self.get_logger().info(
             f"[system_stats] load={la[0]:.2f}/{la[1]:.2f}/{la[2]:.2f} "
-            f"cpu={cpu:.0f}% mem={mem:.0f}%{temp_c} | {procs}"
+            f"cpu={cpu:.0f}% mem={mem:.0f}%{temp_c}{net} | {procs}"
         )
 
 

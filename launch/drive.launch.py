@@ -37,7 +37,14 @@ def generate_launch_description():
     serial_port = LaunchConfiguration("serial_port", default="/dev/ttyUSB0")
     closed_loop = LaunchConfiguration("closed_loop", default="true")
     use_ekf = LaunchConfiguration("use_ekf", default="true")
+    # Camera back ON (2026-06-14): the lidar-only default (use_imu=false) broke
+    # the odom chain -- icp_odometry stopped publishing /odom_icp without the
+    # camera/IMU, so the EKF never produced the odom frame and Nav2 costmaps
+    # failed ("frame 'odom' does not exist"). Restored the known-working camera
+    # config; lidar-only needs isolated debugging (run icp_odometry by hand and
+    # watch its output) before re-trying.
     use_imu = LaunchConfiguration("use_imu", default="true")
+    fuse_imu = LaunchConfiguration("fuse_imu", default="true")  # A/B: EKF fuses gyro yaw-rate
     use_floor_scan = LaunchConfiguration("use_floor_scan", default="true")
     enable_color = LaunchConfiguration("enable_color", default="true")
     log_csv = LaunchConfiguration("log_csv", default="true")
@@ -51,6 +58,8 @@ def generate_launch_description():
                               description="RF2O+IMU EKF on /odom"),
         DeclareLaunchArgument("use_imu", default_value=use_imu,
                               description="D435i IMU for EKF"),
+        DeclareLaunchArgument("fuse_imu", default_value=fuse_imu,
+                              description="EKF fuses gyro yaw-rate; false=ICP-only (A/B test)"),
         DeclareLaunchArgument("use_floor_scan", default_value=use_floor_scan,
                               description="D435i RANSAC -> /camera/scan in local costmap"),
         DeclareLaunchArgument("enable_color", default_value=enable_color,
@@ -71,6 +80,7 @@ def generate_launch_description():
                 "closed_loop": closed_loop,
                 "use_ekf": use_ekf,
                 "use_imu": use_imu,
+                "fuse_imu": fuse_imu,
                 "use_floor_scan": use_floor_scan,
                 "enable_color": enable_color,
             }.items(),

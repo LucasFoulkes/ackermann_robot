@@ -4,7 +4,7 @@
 Default: loop closure + IMU; SLAM on /scan_slam (8 Hz). Local costmap + rf2o use /scan.
 use_floor_scan:=true (default): D435i RANSAC -> /camera/scan in local costmap.
 
-Diagnostics: [system_stats], [tf_health] in this terminal.
+Diagnostics: [system_stats] in this terminal.
 RViz: nav2.rviz, Fixed Frame map, Nav2 Goal tool.
 """
 import os
@@ -32,6 +32,7 @@ def _launch_setup(context, *args, **kwargs):
 
     use_ekf = LaunchConfiguration("use_ekf").perform(context) == "true"
     use_imu = LaunchConfiguration("use_imu").perform(context) == "true"
+    fuse_imu = LaunchConfiguration("fuse_imu").perform(context)  # "true"/"false" -> EKF imu A/B
     use_floor_scan = LaunchConfiguration("use_floor_scan").perform(context) == "true"
     depth_on = "true" if use_floor_scan else "false"
     color_on = LaunchConfiguration("enable_color").perform(context)
@@ -39,8 +40,6 @@ def _launch_setup(context, *args, **kwargs):
     serial_port = LaunchConfiguration("serial_port")
     closed_loop = LaunchConfiguration("closed_loop")
     log_stats = LaunchConfiguration("log_system_stats").perform(context) == "true"
-    log_tf = LaunchConfiguration("log_tf_health").perform(context) == "true"
-    log_twist = LaunchConfiguration("log_twist").perform(context) == "true"
     log_stuck = LaunchConfiguration("log_stuck").perform(context) == "true"
 
     def include(name, launch_arguments=None, condition=None):
@@ -84,22 +83,6 @@ def _launch_setup(context, *args, **kwargs):
             output="screen",
             parameters=[{"period_s": 5.0}],
         ))
-    if log_tf:
-        actions.append(Node(
-            package="ackermann_robot",
-            executable="tf_health",
-            name="tf_health",
-            output="screen",
-            parameters=[{"period_s": 1.0, "ready_max_age_s": 0.5}],
-        ))
-    if log_twist:
-        actions.append(Node(
-            package="ackermann_robot",
-            executable="twist_logger",
-            name="twist_logger",
-            output="screen",
-            parameters=[{"rate_hz": 20.0, "out_dir": "~/ros2_ws/logs"}],
-        ))
     if log_stuck:
         actions.append(Node(
             package="ackermann_robot",
@@ -118,6 +101,7 @@ def _launch_setup(context, *args, **kwargs):
             "ekf_odom.launch.py",
             [
                 ("use_imu", "true" if use_imu else "false"),
+                ("fuse_imu", fuse_imu),
                 ("enable_depth", depth_on),
                 ("enable_color", color_on),  # 424x240x15 (see d435i.launch.py); floor scan itself is xyz-only
                 ("enable_pointcloud", depth_on),
@@ -212,6 +196,8 @@ def generate_launch_description():
         DeclareLaunchArgument("serial_port", default_value=serial_port),
         DeclareLaunchArgument("closed_loop", default_value=closed_loop),
         DeclareLaunchArgument("use_ekf", default_value=use_ekf),
+        DeclareLaunchArgument("fuse_imu", default_value="true",
+                              description="EKF fuses gyro yaw-rate; false=ICP-only (A/B test)"),
         DeclareLaunchArgument("use_imu", default_value=use_imu,
                               description="D435i IMU for EKF"),
         DeclareLaunchArgument(
@@ -224,9 +210,6 @@ def generate_launch_description():
                               description="D435i RGB stream (424x240x15, ~5-10%% core); "
                                           "set false to reclaim CPU"),
         DeclareLaunchArgument("log_system_stats", default_value="true"),
-        DeclareLaunchArgument("log_tf_health", default_value="true"),
-        DeclareLaunchArgument("log_twist", default_value="true",
-                              description="CSV: cmd vs odom twist + effort to ~/ros2_ws/logs"),
         DeclareLaunchArgument("log_stuck", default_value="true",
                               description="cmd vs odom stall detector -> /robot_stuck"),
         OpaqueFunction(function=_launch_setup),

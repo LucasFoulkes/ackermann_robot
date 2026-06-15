@@ -52,7 +52,11 @@ def generate_launch_description():
             # into base_link and /camera/scan stayed empty.
             "camera_name": "d435i",
             # Low depth res/rate: floor scan needs only coarse ~8Hz depth; cuts CPU.
-            "depth_module.depth_profile": "424x240x6",   # 15 fps cost 55% of a core (realsense+floor_scan) for a 0.2 m/s robot
+            # 480x270x6 is the LOWEST valid depth profile this D435i firmware
+            # offers (confirmed via rs-enumerate-devices 2026-06-14). The old
+            # "424x240x6" was INVALID -> realsense silently fell back to
+            # 640x480x15 (~4x the pixels at 2.5x the rate), quietly inflating CPU.
+            "depth_module.depth_profile": "480x270x6",
             # Low color res/rate for the same reason: enough for a teleop/monitor
             # view, cheap on USB + CPU. Compressed transport only costs CPU
             # while something actually subscribes.
