@@ -46,7 +46,6 @@ setup(
             'imu_throttle = ackermann_robot.imu_throttle:main',
             'system_stats = ackermann_robot.system_stats:main',
             'scan_throttle = ackermann_robot.scan_throttle:main',
-            'stuck_monitor = ackermann_robot.stuck_monitor:main',
         ],
     },
 )

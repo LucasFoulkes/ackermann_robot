@@ -27,7 +27,6 @@ def _launch_setup(context, *args, **kwargs):
     effort_yaml = os.path.join(pkg, "config", "cmd_vel_to_effort.yaml")
     driver_yaml = os.path.join(pkg, "config", "ackermann_driver.yaml")
     floor_scan_yaml = os.path.join(pkg, "config", "depth_floor_scan.yaml")
-    stuck_yaml = os.path.join(pkg, "config", "stuck_monitor.yaml")
     speckle_yaml = os.path.join(pkg, "config", "scan_speckle_filter.yaml")
 
     use_ekf = LaunchConfiguration("use_ekf").perform(context) == "true"
@@ -40,7 +39,6 @@ def _launch_setup(context, *args, **kwargs):
     serial_port = LaunchConfiguration("serial_port")
     closed_loop = LaunchConfiguration("closed_loop")
     log_stats = LaunchConfiguration("log_system_stats").perform(context) == "true"
-    log_stuck = LaunchConfiguration("log_stuck").perform(context) == "true"
 
     def include(name, launch_arguments=None, condition=None):
         return IncludeLaunchDescription(
@@ -82,14 +80,6 @@ def _launch_setup(context, *args, **kwargs):
             name="system_stats",
             output="screen",
             parameters=[{"period_s": 5.0}],
-        ))
-    if log_stuck:
-        actions.append(Node(
-            package="ackermann_robot",
-            executable="stuck_monitor",
-            name="stuck_monitor",
-            output="screen",
-            parameters=[stuck_yaml],
         ))
 
     actions.extend([
@@ -210,7 +200,5 @@ def generate_launch_description():
                               description="D435i RGB stream (424x240x15, ~5-10%% core); "
                                           "set false to reclaim CPU"),
         DeclareLaunchArgument("log_system_stats", default_value="true"),
-        DeclareLaunchArgument("log_stuck", default_value="true",
-                              description="cmd vs odom stall detector -> /robot_stuck"),
         OpaqueFunction(function=_launch_setup),
     ])
