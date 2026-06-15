@@ -60,9 +60,18 @@ controller_server:
       # carrot makes it demand tight turns to snap back when off-path -> bridge
       # clamps to full lock -> oversteer. A farther carrot = gentler corrections,
       # curvature demands stay nearer the planned (followable) path.
-      lookahead_dist: 0.65
-      min_lookahead_dist: 0.45
-      max_lookahead_dist: 0.90
+      # Lengthened again 2026-06-15 to break a STEERING LIMIT CYCLE: spectral
+      # analysis of drive_log_204616 showed eff_steer oscillating at 0.3-1 Hz
+      # (85% of its power there, swinging +/-0.59), the robot weaving to match
+      # (odom_w 0.3-1 Hz), and corr(eff_steer,odom_w) = -0.51 -- i.e. the ~1 s
+      # steering wind-in lag puts response out of phase with command, the classic
+      # lag+gain limit cycle. NOT sensor noise (it's in the command), so no filter
+      # fixes it; the cure is gentler corrections. min_lookahead_dist matters most:
+      # velocity-scaling shrinks the carrot at low speed, so the floor was making
+      # RPP MOST aggressive exactly while crawling. Raise the floor to damp it.
+      lookahead_dist: 0.80
+      min_lookahead_dist: 0.65
+      max_lookahead_dist: 1.10
       lookahead_time: 2.0
       use_velocity_scaled_lookahead_dist: true
       # CRITICAL for Ackermann: never try to rotate in place.

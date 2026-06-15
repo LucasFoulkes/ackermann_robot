@@ -45,8 +45,14 @@ def generate_launch_description():
     # watch its output) before re-trying.
     use_imu = LaunchConfiguration("use_imu", default="true")
     fuse_imu = LaunchConfiguration("fuse_imu", default="true")  # A/B: EKF fuses gyro yaw-rate
-    use_floor_scan = LaunchConfiguration("use_floor_scan", default="true")
-    enable_color = LaunchConfiguration("enable_color", default="true")
+    # Floor scan OFF by default (2026-06-15): the depth stream + depth_floor_scan
+    # node cost ~32% of a core and CPU was spiking to 100% (drive_log_150830),
+    # a prime suspect for the stop/go (scan drops, EKF missed deadlines). This is
+    # INDEPENDENT of the IMU -- use_imu still streams the D435i motion module for
+    # EKF vyaw. Re-enable with use_floor_scan:=true when low obstacles matter.
+    use_floor_scan = LaunchConfiguration("use_floor_scan", default="false")
+    # Color unused while floor scan is off (floor scan was xyz-only anyway); off saves a few % core.
+    enable_color = LaunchConfiguration("enable_color", default="false")
     log_csv = LaunchConfiguration("log_csv", default="true")
 
     return LaunchDescription([
