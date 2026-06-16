@@ -17,7 +17,7 @@ Pipeline:
 
 Measurements (robot.urdf.xacro):
   wheelbase = 0.2775 m  (rear axle to front axle)
-  max_steer_angle = seed only — refine with steer_calibration / field tests
+  max_steer_angle = seed only — refine with field tests
 
 max_speed: cmd_vel linear.x at this value -> logical throttle 1.0 -> raw ~1.0 after
 deadband map. Tune from /odom (first log suggested ~0.85 m/s at strong forward effort).
