@@ -42,7 +42,6 @@ setup(
             'cmd_vel_to_effort = ackermann_robot.cmd_vel_to_effort:main',
             'web_teleop = ackermann_robot.web_teleop:main',
             'depth_floor_scan = ackermann_robot.depth_floor_scan:main',
-            'steer_calibration = ackermann_robot.steer_calibration:main',
             'imu_throttle = ackermann_robot.imu_throttle:main',
             'system_stats = ackermann_robot.system_stats:main',
             'scan_throttle = ackermann_robot.scan_throttle:main',

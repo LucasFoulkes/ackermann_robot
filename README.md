@@ -80,7 +80,6 @@ ros2 run tf2_ros tf2_monitor
 - **Motor deadband / cmd_vel scaling:** `config/cmd_vel_to_effort.yaml`
 - **PWM ticks:** `config/ackermann_driver.yaml`
 - **Nav2 speeds / turn radius:** `config/nav2_params.yaml`
-- **Steering calibration:** `ros2 run ackermann_robot steer_calibration` while driving
 
 ---
 
