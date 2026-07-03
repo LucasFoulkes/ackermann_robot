@@ -71,10 +71,15 @@ cmd_vel_to_effort:
 
     # Hard per-direction ceiling on the RAW throttle out. Feedforward, speed
     # trim and stiction kick each obey their own caps but STACK -- the runaway
-    # summed them to raw -0.8 on a -0.2 m/s command. Reverse tighter: the old
-    # drivetrain hit 0.8 m/s at raw -0.66. Retune during the ESC calibration.
+    # summed them to raw -0.8 on a -0.2 m/s command.
+    # Calibrated from SLAM ground truth, 2026-07-02 20:20 drive: the ESC
+    # reverse curve has a CLIFF -- raw -0.61..-0.64 gives 0.22-0.29 m/s
+    # (matches cmd), raw -0.69 gives 0.70-0.92 m/s (the "super fast" reverse;
+    # both fast bursts were kick-pinned at the old 0.70 cap). 0.63 keeps
+    # reverse on the good side of the cliff. Forward at eff ~0.62 measured
+    # 0.29-0.31 m/s ~= cmd, so 0.90 stays.
     raw_throttle_max_fwd: 0.90
-    raw_throttle_max_rev: 0.70
+    raw_throttle_max_rev: 0.63
 
     apply_deadband: true
     # Raw /ackermann/cmd_effort deadband (PlotJuggler startup test — starting values)
