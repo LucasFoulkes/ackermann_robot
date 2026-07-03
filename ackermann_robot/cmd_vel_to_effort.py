@@ -28,6 +28,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32MultiArray
 
 from ackermann_robot.effort_deadband import logical_to_raw
@@ -144,6 +145,22 @@ class CmdVelToEffort(Node):
         self._steer_prev_des = 0.0
         self._steer_dir = 0.0
 
+        # --- vibration metric (OBSERVE ONLY for now) ---
+        # Envelope of accel-magnitude deviation from its slow baseline, from
+        # the already-throttled 30 Hz IMU feed. A moving robot vibrates; a
+        # robot jammed against a wall with a stalled motor doesn't. Logged as
+        # the last debug field to learn real thresholds from a few drives —
+        # the plan is to let it (a) trip the watchdog FAST when odom reads 0
+        # but the chassis clearly moves (blind runaway) and (b) veto the
+        # stiction kick when we're already moving (odom lag), but no control
+        # decision reads it until thresholds are validated.
+        self.vib_enabled = bool(p("vibration_metric", True))
+        self._acc_base = 9.81
+        self.vib = 0.0
+        if self.vib_enabled:
+            self.create_subscription(
+                Imu, p("imu_topic", "/imu/data_ekf"), self._on_imu, 10)
+
         self.publish_debug = bool(p("publish_debug", False))
 
         self.cmd = (0.0, 0.0)
@@ -185,6 +202,12 @@ class CmdVelToEffort(Node):
         self.w_meas = msg.twist.twist.angular.z
         self.last_odom_ns = self.get_clock().now().nanoseconds
 
+    def _on_imu(self, msg: Imu):
+        a = msg.linear_acceleration
+        m = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
+        self._acc_base += 0.02 * (m - self._acc_base)   # slow gravity baseline
+        self.vib += 0.3 * (abs(m - self._acc_base) - self.vib)  # fast envelope
+
     def _raw_throttle(self, logical: float) -> float:
         if not self.apply_deadband:
             return clamp(logical)
@@ -212,7 +235,8 @@ class CmdVelToEffort(Node):
             if self.pub_debug is not None:
                 self.pub_debug.publish(Float32MultiArray(data=[
                     0.0, 0.0, float(self.v_meas), float(self.w_meas),
-                    0.0, 0.0, 0.0, 0.0, 0.0, float(self.kappa_max), 0.0]))
+                    0.0, 0.0, 0.0, 0.0, 0.0, float(self.kappa_max), 0.0,
+                    float(self.vib)]))
             return
         v, w_cmd = self.cmd
 
@@ -230,7 +254,7 @@ class CmdVelToEffort(Node):
                 self.pub_debug.publish(Float32MultiArray(data=[
                     0.0, 0.0, float(self.v_meas), float(self.w_meas),
                     float(w_cmd), 0.0, 0.0, 0.0, 0.0,
-                    float(self.kappa_max), 1.0]))
+                    float(self.kappa_max), 1.0, float(self.vib)]))
             return
 
         # Odometry-distrust watchdog (see __init__ note). Runs after the
@@ -270,7 +294,7 @@ class CmdVelToEffort(Node):
                 self.pub_debug.publish(Float32MultiArray(data=[
                     0.0, 0.0, float(self.v_meas), float(self.w_meas),
                     float(w_cmd), 0.0, 0.0, 0.0, 0.0,
-                    float(self.kappa_max), 2.0]))
+                    float(self.kappa_max), 2.0, float(self.vib)]))
             return
 
         w_clamped = w_cmd
@@ -320,6 +344,7 @@ class CmdVelToEffort(Node):
                 float(w_cmd), float(w_clamped), float(steer_log_out),
                 float(w_limited), float(steer_sat), float(self.kappa_max),
                 0.0,  # 1.0 = interlock branch, 2.0 = watchdog branch
+                float(self.vib),
             ]))
 
     def _hysteresis_comp(self, steer, now):

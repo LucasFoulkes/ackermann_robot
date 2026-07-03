@@ -45,6 +45,7 @@ setup(
             'imu_throttle = ackermann_robot.imu_throttle:main',
             'system_stats = ackermann_robot.system_stats:main',
             'scan_throttle = ackermann_robot.scan_throttle:main',
+            'auto_calib = ackermann_robot.auto_calib:main',
         ],
     },
 )

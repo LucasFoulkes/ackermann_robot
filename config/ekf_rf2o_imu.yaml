@@ -15,8 +15,13 @@
 
 ekf_filter_node:
   ros__parameters:
-    # Output rate. Keep <= imu_throttle imu_hz; Pi may not sustain 30 under load.
-    frequency: 20.0   # 30 Hz missed deadlines under load (cycles 30-80 ms); 20 Hz is ample at 0.2 m/s
+    # Output rate. Keep <= imu_throttle imu_hz. The EKF PREDICTS between
+    # sensor updates, so this is the cheap way to give the control loops
+    # (speed PI, watchdog, interlock) fresher velocity than the 10 Hz sensors
+    # provide. 30 Hz missed deadlines in the pre-CPU-diet era (load 6.5);
+    # post-diet (load ~1, CPU 35-47%, 2026-07-02) it's worth retrying. If
+    # "cycle time exceeded" warnings return under Nav2 load, drop back to 20.
+    frequency: 30.0
     sensor_timeout: 0.5
     two_d_mode: true
     publish_tf: true

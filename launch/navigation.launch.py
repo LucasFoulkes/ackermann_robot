@@ -117,6 +117,17 @@ def _launch_setup(context, *args, **kwargs):
             respawn_delay=2.0,
         ))
     actions.append(include("slam.launch.py", [("slam_params_file", slam_params)]))
+    if LaunchConfiguration("auto_calib").perform(context) == "true":
+        # Observe-only drivetrain self-calibration (~2% core): learns breakaway
+        # deadband + steady (u,v) pairs from normal driving, reports every 15 s.
+        # Unlike drive_logger (raw CSV for offline reading), this computes live
+        # fits; nothing feeds control yet.
+        actions.append(Node(
+            package="ackermann_robot",
+            executable="auto_calib",
+            name="auto_calib",
+            output="screen",
+        ))
     actions.extend([
         Node(
             package="ackermann_robot",
@@ -200,5 +211,7 @@ def generate_launch_description():
                               description="D435i RGB stream (424x240x15, ~5-10%% core); "
                                           "set false to reclaim CPU"),
         DeclareLaunchArgument("log_system_stats", default_value="true"),
+        DeclareLaunchArgument("auto_calib", default_value="true",
+                              description="observe-only drivetrain self-calibration"),
         OpaqueFunction(function=_launch_setup),
     ])
