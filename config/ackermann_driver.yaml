@@ -30,3 +30,15 @@ actuator_driver:
     # reverse command isn't read as brake). The cmd_vel_to_effort interlock does
     # the main job; this is the driver-level backstop.
     neutral_hold_ms: 100.0
+
+    # Brake/reverse double-tap (2026-07-02 pulse test: without it, the same
+    # ~-0.6 reverse effort engaged 0.3 m/s three times and NOTHING three
+    # times -- the ESC read the pulse as brake depending on its internal
+    # state). On entering reverse from any non-reverse output: brake tap at
+    # the commanded magnitude (tap_ms), neutral gap (tap_gap_ms), then stream
+    # reverse. Re-arm (tap again) after the output has been out of reverse
+    # for rearm_reset_ms. Adds ~300 ms latency to every reverse engagement.
+    esc_double_tap: true
+    esc_tap_ms: 150.0
+    esc_tap_gap_ms: 150.0
+    esc_rearm_reset_ms: 500.0

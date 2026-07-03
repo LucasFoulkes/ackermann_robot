@@ -199,8 +199,14 @@ class CmdVelToEffort(Node):
         if now - self.last_cmd_ns > self.timeout_ns:
             # Stale cmd: hard neutral. No trims either — the yaw PI must not
             # counter-steer a coasting robot that nobody is commanding.
+            # Watchdog resets too: without this the trip LATCHED across stale
+            # gaps (watch_since kept its old epoch), so every later command
+            # re-tripped instantly and the robot was bricked (2026-07-02
+            # pulse test: all pulses got eff 0.00).
             self.integral = 0.0
             self.yaw_integral = 0.0
+            self._watch_since = None
+            self._watch_tripped = False
             self.pub.publish(Float32MultiArray(data=[0.0, 0.0]))
             if self.pub_debug is not None:
                 self.pub_debug.publish(Float32MultiArray(data=[

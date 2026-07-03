@@ -66,6 +66,22 @@ class ActuatorDriver(Node):
             esc_max - self.esc_neutral,
         )
 
+        # ESC brake/reverse state machine: coming from forward (and often from
+        # plain neutral), the ESC reads the first reverse pulse as BRAKE;
+        # reverse only engages after brake -> neutral -> reverse (the
+        # "double-tap"). Without it, engagement was a coin flip — the
+        # 2026-07-02 pulse test sent the same ~-0.6 effort six times and got
+        # 0.3 m/s three times and nothing three times. Tap at the commanded
+        # magnitude, hold neutral for the gap, then stream reverse. Re-arm
+        # from scratch whenever the output leaves reverse for rearm_reset_ms.
+        self.double_tap = bool(self.param("esc_double_tap", True))
+        self.tap_ns = int(max(0.0, self.param("esc_tap_ms", 150.0)) * 1e6)
+        self.tap_gap_ns = int(max(0.0, self.param("esc_tap_gap_ms", 150.0)) * 1e6)
+        self.rearm_reset_ns = int(max(0.0, self.param("esc_rearm_reset_ms", 500.0)) * 1e6)
+        self._rev_armed = False
+        self._rev_phase = None      # None | ["tap"|"gap", end_ns]
+        self._last_rev_out_ns = 0
+
         self.cmd = (0.0, 0.0)
         now = self.get_clock().now().nanoseconds
         self.last_cmd_ns = now
@@ -111,9 +127,11 @@ class ActuatorDriver(Node):
         if throttle > 0.0 and now >= self.last_reverse_ns + self.reverse_delay_ns:
             self.last_forward_ns = now
             esc_throttle = throttle
+            self._rev_armed = False
+            self._rev_phase = None
         elif throttle < 0.0 and now >= self.last_forward_ns + self.reverse_delay_ns:
             self.last_reverse_ns = now
-            esc_throttle = throttle
+            esc_throttle = self._reverse_throttle(throttle, now)
         if self.esc_inverted:
             esc_throttle = -esc_throttle
         esc_tick = round(self.esc_neutral + esc_throttle * self.esc_half_range)
@@ -123,6 +141,29 @@ class ActuatorDriver(Node):
             self._set(self.esc_ch, esc_tick)
         except OSError as e:
             self.get_logger().error(f"I2C write failed: {e}", throttle_duration_sec=1.0)
+
+    def _reverse_throttle(self, throttle, now):
+        """Double-tap gate for reverse (see the __init__ note)."""
+        if not self.double_tap:
+            return throttle
+        if self._rev_armed and now - self._last_rev_out_ns > self.rearm_reset_ns:
+            # Output left reverse long enough for the ESC to forget its mode.
+            self._rev_armed = False
+        if not self._rev_armed:
+            if self._rev_phase is None:
+                self._rev_phase = ["tap", now + self.tap_ns]
+            phase, end_ns = self._rev_phase
+            if phase == "tap":
+                if now < end_ns:
+                    return throttle          # read as brake by the ESC
+                self._rev_phase = ["gap", now + self.tap_gap_ns]
+                return 0.0
+            if now < end_ns:                 # neutral gap
+                return 0.0
+            self._rev_armed = True
+            self._rev_phase = None
+        self._last_rev_out_ns = now
+        return throttle
 
     def _set(self, ch: int, tick):
         tick = max(0, min(4095, int(tick)))
