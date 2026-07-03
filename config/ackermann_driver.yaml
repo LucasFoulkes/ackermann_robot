@@ -15,8 +15,18 @@ actuator_driver:
     steering_max_tick: 410
     steering_inverted: false
 
-    motor_forward_channel: 1
-    motor_backward_channel: 2
-    throttle_max_tick: 1638
+    # Single servo-style ESC (forward/brake/reverse) on channel 14.
+    # Ticks at 50 Hz: 307~=1500us (neutral/stop). Full ESC throw is 205/410
+    # (1000/2000us, ~+/-103 ticks). SPEED CAPPED TO 30%: min/max pulled in to
+    # neutral +/-31 ticks, so logical throttle +/-1.0 = 30% of physical range.
+    # Raise toward 205/410 for more speed; esc_inverted flips fwd/rev.
+    esc_channel: 14
+    esc_min_tick: 256    # 50% reverse (full = 205)
+    esc_neutral_tick: 307
+    esc_max_tick: 359    # 50% forward (full = 410)
+    esc_inverted: true
 
+    # Neutral dwell held across a forward<->reverse flip (ESC needs the gap so a
+    # reverse command isn't read as brake). The cmd_vel_to_effort interlock does
+    # the main job; this is the driver-level backstop.
     neutral_hold_ms: 100.0

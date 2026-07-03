@@ -53,10 +53,18 @@ class ActuatorDriver(Node):
             steering_max - self.steering_center,
         )
 
-        # Drive motor: dual-channel H-bridge (forward / backward)
-        self.forward_ch = self.param("motor_forward_channel", 1)
-        self.reverse_ch = self.param("motor_backward_channel", 2)
-        self.throttle_max = self.param("throttle_max_tick", 1638)
+        # Drive motor: single servo-style ESC channel (was a dual-channel
+        # H-bridge). Neutral 1500 us = stopped, >neutral forward, <neutral
+        # reverse — linear map -1..1 -> neutral +/- half, same shape as steering.
+        self.esc_ch = self.param("esc_channel", 14)
+        self.esc_inverted = bool(self.param("esc_inverted", False))
+        esc_min = self.param("esc_min_tick", 205)
+        esc_max = self.param("esc_max_tick", 410)
+        self.esc_neutral = self.param("esc_neutral_tick", 307)
+        self.esc_half_range = min(
+            self.esc_neutral - esc_min,
+            esc_max - self.esc_neutral,
+        )
 
         self.cmd = (0.0, 0.0)
         now = self.get_clock().now().nanoseconds
@@ -95,19 +103,24 @@ class ActuatorDriver(Node):
 
         steering_tick = round(self.steering_center + steering * self.steering_half_range)
 
-        # Motor: block a direction flip until the opposite side has idled reverse_delay_ns.
-        forward = reverse = 0
+        # ESC: hold neutral through a direction flip until the opposite side has
+        # idled reverse_delay_ns, so a forward/brake/reverse ESC crosses neutral
+        # cleanly (the brake/reverse double-tap) instead of braking when we want
+        # reverse. esc_throttle stays 0 (neutral) while blocked or commanded 0.
+        esc_throttle = 0.0
         if throttle > 0.0 and now >= self.last_reverse_ns + self.reverse_delay_ns:
             self.last_forward_ns = now
-            forward = round(throttle * self.throttle_max)
+            esc_throttle = throttle
         elif throttle < 0.0 and now >= self.last_forward_ns + self.reverse_delay_ns:
             self.last_reverse_ns = now
-            reverse = round(-throttle * self.throttle_max)
+            esc_throttle = throttle
+        if self.esc_inverted:
+            esc_throttle = -esc_throttle
+        esc_tick = round(self.esc_neutral + esc_throttle * self.esc_half_range)
 
         try:
             self._set(self.steering_ch, steering_tick)
-            self._set(self.forward_ch, forward)
-            self._set(self.reverse_ch, reverse)
+            self._set(self.esc_ch, esc_tick)
         except OSError as e:
             self.get_logger().error(f"I2C write failed: {e}", throttle_duration_sec=1.0)
 
@@ -117,8 +130,8 @@ class ActuatorDriver(Node):
 
     def destroy_node(self):
         try:
-            for ch in (self.steering_ch, self.forward_ch, self.reverse_ch):
-                self._set(ch, 0)
+            self._set(self.esc_ch, self.esc_neutral)  # ESC -> stopped, not a 0us disarm glitch
+            self._set(self.steering_ch, 0)
             self.pca.deinit()
         except Exception:
             pass
