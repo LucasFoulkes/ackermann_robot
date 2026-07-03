@@ -123,6 +123,7 @@ class CmdVelToEffort(Node):
         self.watchdog_v_moving = float(p("watchdog_v_moving", 0.05))
         self._watch_since = None
         self._watch_tripped = False
+        self._watch_sign = 0.0
 
         # --- raw output ceiling ---
         # Feedforward, trim and kick each obey their own caps but STACK: the
@@ -234,6 +235,15 @@ class CmdVelToEffort(Node):
 
         # Odometry-distrust watchdog (see __init__ note). Runs after the
         # interlock so a legitimate direction change doesn't count as a stall.
+        # A command sign flip re-arms it: driving the OTHER way is the escape
+        # route from a stall, and Nav2 flips sign without releasing the cmd —
+        # without this, a forward-stall trip also blocked the reverse escape
+        # (2026-07-02 21:21 log, t=63.5/70: cmd -0.3 got eff 0.00).
+        sign = 1.0 if v > self.v_eps else (-1.0 if v < -self.v_eps else 0.0)
+        if sign != 0.0 and sign != self._watch_sign:
+            self._watch_since = None
+            self._watch_tripped = False
+            self._watch_sign = sign
         if self.watchdog_enabled and abs(v) > self.v_eps:
             odom_alive = odom_fresh and abs(self.v_meas) >= self.watchdog_v_moving
             if odom_alive:

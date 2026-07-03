@@ -31,7 +31,10 @@ cmd_vel_to_effort:
     # speed PI holds the speed by trimming toward/below the threshold.
     # Requires throttle_deadband_rev to be the TRUE threshold (0.45): with the
     # old 0.55 floor the PI physically could not command anything gentler.
-    max_speed_rev: 2.0
+    # 2.6 (was 2.0): at 2.0 the cmd -0.3 feedforward landed at raw -0.53 =
+    # already pinned at the ceiling, and one 2.5 s stretch still hit 0.55 m/s
+    # (21:21 log). 2.6 starts at raw -0.51 and leaves the PI headroom.
+    max_speed_rev: 2.6
 
     # Hold neutral when commanded direction opposes measured motion (drivetrain
     # needs ~1.3 s to reverse; steering sign was mirrored during 3-point turns).
@@ -121,7 +124,11 @@ cmd_vel_to_effort:
     # stiction logic, not a hot kp.)
     vel_kp: 0.25
     vel_ki: 0.3
-    vel_trim_max: 0.12
+    # 0.2 (was 0.12): the ESC self-accelerates in reverse, so the PI needs
+    # enough downward authority to pull the pulse below the 0.45 threshold
+    # and actually shed speed (0.12 logical = only 0.066 raw, not enough).
+    # Reverse trim is brake-only, so extra authority can't cause a runaway.
+    vel_trim_max: 0.2
     # Above this measured yaw rate, freeze the speed trim (ICP over-reports
     # linear speed in turns -> PI was cutting throttle to 0 mid-corner).
     speed_trim_yaw_gate: 0.15
