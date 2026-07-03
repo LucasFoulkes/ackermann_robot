@@ -22,10 +22,16 @@ cmd_vel_to_effort:
     # deadband so the speed loop stops bang-banging. Tune: real << cmd -> lower;
     # real >> cmd -> raise (max_speed = old * real/commanded).
     max_speed: 1.0
-    # Reverse slope measured 2026-06-11: cmd -0.2 -> odom -0.8 m/s with the old
-    # symmetric mapping (raw just past deadband is already fast). 3.4 makes
-    # logical reverse throttle proportional to real speed; speed PI trims rest.
-    max_speed_rev: 3.4
+    # Reverse re-calibrated on the ESC drivetrain (raw sweep, 2026-07-02
+    # 21:09): true threshold is between raw -0.40 (no motion) and -0.50
+    # (moves), and at a FIXED raw effort the ESC ACCELERATES continuously
+    # (-0.50 held 3 s: 0.2 -> 0.9 m/s) -- reverse is a torque command, not a
+    # speed command. So the feedforward only picks the engagement point
+    # (cmd -0.2 -> logical 0.1 -> raw ~-0.50 with deadband 0.45) and the
+    # speed PI holds the speed by trimming toward/below the threshold.
+    # Requires throttle_deadband_rev to be the TRUE threshold (0.45): with the
+    # old 0.55 floor the PI physically could not command anything gentler.
+    max_speed_rev: 2.0
 
     # Hold neutral when commanded direction opposes measured motion (drivetrain
     # needs ~1.3 s to reverse; steering sign was mirrored during 3-point turns).
@@ -82,9 +88,13 @@ cmd_vel_to_effort:
     raw_throttle_max_rev: 0.63
 
     apply_deadband: true
-    # Raw /ackermann/cmd_effort deadband (PlotJuggler startup test — starting values)
+    # Raw /ackermann/cmd_effort deadband. fwd is still the H-bridge-era value
+    # (works well: eff ~0.62 -> 0.30 m/s measured). rev re-measured on the ESC
+    # via raw sweep 2026-07-02: -0.40 no motion, -0.50 moves. 0.55 was an
+    # H-bridge fossil ABOVE the real threshold -- it skipped the gentle zone
+    # entirely and pinned every reverse into the fast band.
     throttle_deadband_fwd: 0.45   # forward: below this, motion weak/unreliable
-    throttle_deadband_rev: 0.55   # reverse
+    throttle_deadband_rev: 0.45   # reverse (ESC-measured threshold)
     steer_deadband_pos: 0.05   # servo is POSITION-proportional (driver maps center + steer*half_range) — 0.55 was mis-measured and quantized steering to >=55% of lock
     steer_deadband_neg: 0.05   # small linkage-slop allowance; yaw PI trims the rest
 
