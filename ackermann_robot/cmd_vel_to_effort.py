@@ -334,8 +334,13 @@ class CmdVelToEffort(Node):
         return clamp(steer)
 
     def _stiction_kick(self, throttle_log, v_cmd, now):
-        """Ramp extra throttle while commanded to move but odom shows no motion."""
-        if not self.kick_enabled or abs(v_cmd) < 0.05 \
+        """Ramp extra throttle while commanded to move but odom shows no motion.
+
+        FORWARD ONLY: in reverse the driver's double-tap holds ~300 ms of
+        tap+neutral before engaging, which reads as a stall and fired the kick
+        right as the ESC bit -- the ESC then accelerates on its own (it needs
+        speed shed, never added)."""
+        if not self.kick_enabled or v_cmd < 0.05 \
                 or (now - self.last_odom_ns) > self.odom_timeout_ns:
             self._stall_since = None
             self._kick = 0.0
@@ -365,8 +370,18 @@ class CmdVelToEffort(Node):
             return 0.0
         err = v_cmd - self.v_meas
         self.integral = clamp(self.integral + err * self.dt, -0.3, 0.3)
-        return clamp(self.kp * err + self.ki * self.integral,
+        trim = clamp(self.kp * err + self.ki * self.integral,
                      -self.trim_max, self.trim_max)
+        if v_cmd < 0.0:
+            # Reverse trim is BRAKE-ONLY: the ESC accelerates at constant
+            # effort (raw sweep 2026-07-02: -0.50 held 3 s went 0.2 -> 0.9
+            # m/s), so the PI's job in reverse is purely to shed speed. During
+            # the double-tap's ~300 ms the robot is commanded but stationary,
+            # which wound the integral the wrong way and pinned trim at -0.12
+            # (deeper reverse) right as the ESC engaged.
+            self.integral = max(0.0, self.integral)
+            trim = max(0.0, trim)
+        return trim
 
     def _steer_trim(self, steer_log_des, v_cmd, now):
         """PI on the estimated effective steering angle from odom yaw rate.

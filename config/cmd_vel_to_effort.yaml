@@ -85,7 +85,9 @@ cmd_vel_to_effort:
     # reverse on the good side of the cliff. Forward at eff ~0.62 measured
     # 0.29-0.31 m/s ~= cmd, so 0.90 stays.
     raw_throttle_max_fwd: 0.90
-    raw_throttle_max_rev: 0.63
+    # 0.55 (was 0.63): the raw sweep showed -0.50 engages and then the ESC
+    # self-accelerates; anything deeper only adds torque it doesn't need.
+    raw_throttle_max_rev: 0.55
 
     apply_deadband: true
     # Raw /ackermann/cmd_effort deadband. fwd is still the H-bridge-era value
