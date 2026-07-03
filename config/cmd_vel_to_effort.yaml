@@ -57,6 +57,25 @@ cmd_vel_to_effort:
     kick_max: 0.35       # cap (logical units)
     kick_v_moving: 0.05  # m/s, kick bleeds off above this
 
+    # --- Odometry-distrust watchdog (2026-07-02 reverse runaway) ---
+    # Lidar ICP couldn't track fast reverse -> odom_v read 0 while the robot
+    # backed away; the stiction kick + speed trim piled effort onto a "stalled"
+    # robot that was actually accelerating blind. If commanded motion produces
+    # no measured motion for watchdog_stall_s (or odom goes stale), hold
+    # neutral until the command releases or odom shows motion. A real stall
+    # loses nothing (the kick had its window: kick_delay_s + ramp); a blind
+    # runaway coasts to a stop. Set false only for odom-less bench teleop.
+    odom_watchdog: true
+    watchdog_stall_s: 2.0
+    watchdog_v_moving: 0.05   # m/s, measured speed that counts as "moving"
+
+    # Hard per-direction ceiling on the RAW throttle out. Feedforward, speed
+    # trim and stiction kick each obey their own caps but STACK -- the runaway
+    # summed them to raw -0.8 on a -0.2 m/s command. Reverse tighter: the old
+    # drivetrain hit 0.8 m/s at raw -0.66. Retune during the ESC calibration.
+    raw_throttle_max_fwd: 0.90
+    raw_throttle_max_rev: 0.70
+
     apply_deadband: true
     # Raw /ackermann/cmd_effort deadband (PlotJuggler startup test — starting values)
     throttle_deadband_fwd: 0.45   # forward: below this, motion weak/unreliable

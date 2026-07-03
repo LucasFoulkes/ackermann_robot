@@ -109,6 +109,28 @@ class CmdVelToEffort(Node):
         self._stall_since = None
         self._kick = 0.0
 
+        # --- odometry-distrust watchdog ---
+        # 2026-07-02 runaway: fast reverse the lidar ICP couldn't track read as
+        # odom_v 0 while the robot backed away -- the stiction kick + speed trim
+        # then piled effort onto a "stalled" robot that was actually
+        # accelerating blind. Commanded motion with no measured motion for
+        # watchdog_stall_s (or stale odom) means a hopeless stall or a blind
+        # runaway; both end the same: neutral until the command releases or
+        # odom shows motion again. A real stall loses nothing (the kick already
+        # had its window); a blind runaway coasts to a stop.
+        self.watchdog_enabled = bool(p("odom_watchdog", True))
+        self.watchdog_stall_s = float(p("watchdog_stall_s", 2.0))
+        self.watchdog_v_moving = float(p("watchdog_v_moving", 0.05))
+        self._watch_since = None
+        self._watch_tripped = False
+
+        # --- raw output ceiling ---
+        # Feedforward, trim and kick each obey their own caps but STACK: the
+        # runaway run summed them to raw -0.8 on a -0.2 m/s command. No
+        # combination may exceed a known-safe raw effort per direction.
+        self.raw_max_fwd = float(p("raw_throttle_max_fwd", 0.90))
+        self.raw_max_rev = float(p("raw_throttle_max_rev", 0.70))
+
         # --- steering hysteresis compensation ---
         # The loaded linkage is hysteretic (servo saver + tire bore friction):
         # wheel angle depends on motion history, not just the command —
@@ -135,7 +157,8 @@ class CmdVelToEffort(Node):
         self.create_subscription(
             TwistStamped, p("cmd_stamped_topic", "/cmd_vel_nav"),
             lambda m: self._on_cmd(m.twist), 10)
-        if self.closed_loop or self.yaw_closed_loop or self.interlock:
+        if (self.closed_loop or self.yaw_closed_loop or self.interlock
+                or self.watchdog_enabled):
             self.create_subscription(Odometry, p("odom_topic", "/odom"), self._on_odom, 10)
         self.pub = self.create_publisher(
             Float32MultiArray, p("effort_topic", "/ackermann/cmd_effort"), 10)
@@ -203,6 +226,37 @@ class CmdVelToEffort(Node):
                     float(self.kappa_max), 1.0]))
             return
 
+        # Odometry-distrust watchdog (see __init__ note). Runs after the
+        # interlock so a legitimate direction change doesn't count as a stall.
+        if self.watchdog_enabled and abs(v) > self.v_eps:
+            odom_alive = odom_fresh and abs(self.v_meas) >= self.watchdog_v_moving
+            if odom_alive:
+                self._watch_since = None
+                self._watch_tripped = False
+            elif self._watch_since is None:
+                self._watch_since = now
+            elif (now - self._watch_since) / 1e9 >= self.watchdog_stall_s:
+                self._watch_tripped = True
+        else:
+            self._watch_since = None
+            self._watch_tripped = False
+        if self._watch_tripped:
+            self.integral = 0.0
+            self.yaw_integral = 0.0
+            self._kick = 0.0
+            self._stall_since = None
+            self.get_logger().warning(
+                f"odom watchdog: {self.watchdog_stall_s:.1f} s of commanded "
+                "motion with no measured motion -- holding neutral "
+                "(stall or blind odometry)", throttle_duration_sec=2.0)
+            self.pub.publish(Float32MultiArray(data=[0.0, 0.0]))
+            if self.pub_debug is not None:
+                self.pub_debug.publish(Float32MultiArray(data=[
+                    0.0, 0.0, float(self.v_meas), float(self.w_meas),
+                    float(w_cmd), 0.0, 0.0, 0.0, 0.0,
+                    float(self.kappa_max), 2.0]))
+            return
+
         w_clamped = w_cmd
         w_limited = 0.0
 
@@ -237,6 +291,9 @@ class CmdVelToEffort(Node):
 
         steer = self._raw_steer(steer_log_out)
         throttle = self._raw_throttle(throttle_log)
+        # Per-direction ceiling on the final raw value (see __init__ note:
+        # the individually-capped terms stack).
+        throttle = clamp(throttle, -self.raw_max_rev, self.raw_max_fwd)
         steer_sat = 1.0 if abs(steer_log_out) >= 0.98 else 0.0
 
         self.pub.publish(Float32MultiArray(data=[float(steer), float(throttle)]))
@@ -246,7 +303,7 @@ class CmdVelToEffort(Node):
                 float(self.v_meas), float(self.w_meas),
                 float(w_cmd), float(w_clamped), float(steer_log_out),
                 float(w_limited), float(steer_sat), float(self.kappa_max),
-                0.0,  # interlock flag (1.0 only in the interlock branch)
+                0.0,  # 1.0 = interlock branch, 2.0 = watchdog branch
             ]))
 
     def _hysteresis_comp(self, steer, now):
