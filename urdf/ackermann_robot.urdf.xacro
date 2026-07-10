@@ -15,11 +15,14 @@
   <xacro:property name="wheel_radius" value="0.060"/>
   <xacro:property name="wheel_width" value="0.057"/>
 
-  <!-- Thin chassis plate: axle-to-axle and between the inner tire faces. -->
-  <xacro:property name="body_length" value="${wheelbase}"/>
+  <!-- Thin chassis plate: measured body length, between inner tire faces. -->
+  <xacro:property name="body_rear_x" value="-0.0538"/>
+  <xacro:property name="body_front_x" value="0.3312"/>
+  <xacro:property name="body_length" value="${body_front_x - body_rear_x}"/>
   <xacro:property name="body_width" value="${track_width - wheel_width}"/>
   <xacro:property name="body_height" value="${wheel_radius}"/>
-  <xacro:property name="body_center_x" value="${wheelbase / 2.0}"/>
+  <xacro:property name="body_center_x"
+                  value="${(body_front_x + body_rear_x) / 2.0}"/>
   <xacro:property name="body_center_z" value="${1.5 * wheel_radius}"/>
 
   <!-- Sensor centers measured from base_link. -->
