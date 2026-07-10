@@ -48,6 +48,8 @@ class DriveLogger(Node):
         self.cmd_v = self.cmd_w = NAN
         self.odom_v = self.odom_w = NAN
         self.eff_d = self.eff_s = NAN
+        self.ctl_state = NAN
+        self.vib = NAN
         self.w_clamped = self.steer_log = NAN
         self.w_limited = self.steer_sat = 0.0
         self.kappa_max = NAN
@@ -83,7 +85,7 @@ class DriveLogger(Node):
             "t,cmd_v,cmd_w,w_clamped,odom_v,odom_w,eff_steer,eff_drive,"
             "kappa_cmd,kappa_use,kappa_odom,kappa_max,w_limited,steer_sat,"
             "w_track_err,nav2_track_err,trim_speed,trim_steer,"
-            "map_x,map_y,map_yaw_deg,cpu_pct\n"
+            "map_x,map_y,map_yaw_deg,cpu_pct,ctl_state,vib\n"
         )
         self.t0 = self.get_clock().now().nanoseconds
         hz = max(1.0, float(self.declare_parameter("rate_hz", 10.0).value))
@@ -109,6 +111,14 @@ class DriveLogger(Node):
             self.w_limited = msg.data[7]
             self.steer_sat = msg.data[8]
             self.kappa_max = msg.data[9]
+        if len(msg.data) >= 12:
+            # ctl_state: 0=normal, 1=interlock hold, 2=watchdog hold.
+            # vib: accel-envelope chassis-vibration metric (m/s^2-ish).
+            # Both existed on the debug topic but were never logged — every
+            # stall/hold diagnosis so far had to infer them from effort
+            # patterns (2026-07-03).
+            self.ctl_state = msg.data[10]
+            self.vib = msg.data[11]
 
     def _cpu_read(self):
         with open("/proc/stat") as f:
@@ -148,7 +158,9 @@ class DriveLogger(Node):
             f"{int(self.w_limited)},{int(self.steer_sat)},"
             f"{w_err:.4f},{nav2_err:.4f},"
             f"{self.trim_sp:.4f},{self.trim_st:.4f},"
-            f"{mx:.4f},{my:.4f},{myaw:.3f},{self.cpu_pct():.1f}\n"
+            f"{mx:.4f},{my:.4f},{myaw:.3f},{self.cpu_pct():.1f},"
+            f"{int(self.ctl_state) if math.isfinite(self.ctl_state) else -1},"
+            f"{self.vib:.3f}\n"
         )
 
 

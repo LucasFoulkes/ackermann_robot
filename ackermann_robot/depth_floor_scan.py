@@ -92,6 +92,21 @@ class DepthFloorScan(Node):
         self.floor_pctile = float(p("floor_percentile", 5.0))
         self.floor_z_min = float(p("floor_z_min", -0.10))
         self.floor_z_max = float(p("floor_z_max", 0.10))
+        # Temporal floor filter (2026-07-03): the raw per-frame percentile
+        # wandered -0.008..-0.080 m within seconds (accelerations tilt the
+        # IMU gravity direction; scene content shifts the percentile), and
+        # every dip pushed real floor above min_obstacle_height -> "floor is
+        # an obstacle". The chassis-to-floor distance is physically near-
+        # constant, so: slow EMA + single-frame jump rejection; the obstacle
+        # threshold always uses the FILTERED estimate.
+        self.floor_alpha = float(p("floor_filter_alpha", 0.08))
+        self.floor_jump_gate = float(p("floor_jump_gate", 0.03))
+        self._floor_filt = None
+        self._floor_boot = []
+        self._floor_rejects = []
+        # plausible chassis-to-floor band (base_link z of true floor):
+        self.floor_plaus_min = float(p("floor_plausible_min", -0.12))
+        self.floor_plaus_max = float(p("floor_plausible_max", 0.02))
         self.min_h = float(p("min_obstacle_height", 0.06))
         self.max_h = float(p("max_obstacle_height", 0.195))
         self.angle_min = float(p("angle_min", -1.0))
@@ -141,8 +156,10 @@ class DepthFloorScan(Node):
     def _process(self):
         try:
             self._process_cloud()
-        except Exception as exc:
-            self.get_logger().error(f"depth_floor_scan failed: {exc}")
+        except Exception:
+            import traceback
+            self.get_logger().error(
+                "depth_floor_scan failed:\n" + traceback.format_exc())
 
     def _floor_ransac_sample(self, sample):
         """Bias RANSAC toward the floor, not the nearest wall."""
@@ -196,18 +213,57 @@ class DepthFloorScan(Node):
         if body_all is None:
             return
         z = body_all[:, 2]
-        floor_z = float(np.percentile(z, self.floor_pctile))
-        if not (self.floor_z_min <= floor_z <= self.floor_z_max):
+        raw_floor = float(np.percentile(z, self.floor_pctile))
+        if not (self.floor_z_min <= raw_floor <= self.floor_z_max):
             self.get_logger().warn(
-                f"gravity: floor z {floor_z:.3f} m outside [{self.floor_z_min}, "
+                f"gravity: floor z {raw_floor:.3f} m outside [{self.floor_z_min}, "
                 f"{self.floor_z_max}] -- bad TF or robot tilted; skipping",
                 throttle_duration_sec=2.0)
             self._publish_empty()
             return
+        # Robust temporal filter: bootstrap with a median, then slow EMA with
+        # single-frame jump rejection — PLUS divergence recovery: if raw
+        # disagrees with the filter for many consecutive frames, the filter
+        # is the wrong one (first deploy latched at a bad startup bootstrap
+        # of -0.135 while raw sat at -0.05, and the gate rejected truth
+        # forever -> whole floor became "obstacle"). Re-bootstrap from the
+        # recent rejected frames instead of trusting the latch.
+        if self._floor_filt is None:
+            self._floor_boot.append(raw_floor)
+            if len(self._floor_boot) >= 5:
+                self._floor_filt = float(np.median(self._floor_boot))
+            floor_z = raw_floor
+        else:
+            if abs(raw_floor - self._floor_filt) <= self.floor_jump_gate:
+                self._floor_filt += self.floor_alpha * (raw_floor - self._floor_filt)
+                self._floor_rejects = []
+            else:
+                self._floor_rejects.append(raw_floor)
+                if len(self._floor_rejects) >= 10:   # ~2.5 s of consistent disagreement
+                    new = float(np.median(self._floor_rejects))
+                    # Re-bootstrap ONLY to physically plausible floor heights.
+                    # First deploy chased pitch transients (hard accel tips
+                    # the chassis, raw slid -0.05 -> -0.21 within seconds,
+                    # 2026-07-04 11:28) down to impossible depths, dropping
+                    # the obstacle threshold onto real floor. The chassis-to-
+                    # floor distance can only live in a narrow band.
+                    if self.floor_plaus_min <= new <= self.floor_plaus_max:
+                        self.get_logger().warn(
+                            f"floor filter diverged (held {self._floor_filt:.3f}, "
+                            f"reality ~{new:.3f}) -- re-bootstrapping")
+                        self._floor_filt = new
+                    else:
+                        self.get_logger().warn(
+                            f"floor filter: ignoring implausible re-bootstrap "
+                            f"target {new:.3f} (pitch transient?)",
+                            throttle_duration_sec=10.0)
+                    self._floor_rejects = []
+            floor_z = self._floor_filt
         self.pub_dist.publish(Float32(data=float(-floor_z)))
         self.pub_tilt.publish(Vector3(x=0.0, y=0.0, z=0.0))  # base_link is leveled
         self.get_logger().info(
-            f"floor(grav): z={floor_z:.3f} m, {sample.shape[0]} pts",
+            f"floor(grav): z={floor_z:.3f} m (raw {raw_floor:.3f}), "
+            f"{sample.shape[0]} pts",
             throttle_duration_sec=2.0)
         haf = z - floor_z
         body = body_all[(haf >= self.min_h) & (haf <= self.max_h)]

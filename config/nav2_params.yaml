@@ -29,16 +29,30 @@ controller_server:
     failure_tolerance: 2.0
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["goal_checker"]
+    # MPPI: evaluated and RETIRED on Jazzy (2026-07-04 research): documented
+    # steering chatter on slow Ackermann linkages (nav2 #4757 user returned
+    # to RPP), no ARM optimization until the Kilted Eigen rewrite, and
+    # Lyrical's model_delay_wz is the real slow-steering answer. Re-open at
+    # the Nav2-upgrade milestone; ready config in docs/platform_survey.md.
     controller_plugins: ["FollowPath"]
 
     # PoseProgressChecker counts heading change as progress too, so slow Ackermann
     # turns / multi-point maneuvers are not falsely flagged "stuck". Smaller radius
     # + longer allowance make a real stall the only trigger.
+    # SimpleProgressChecker (2026-07-05 01:45): was PoseProgressChecker,
+    # which counts HEADING CHANGE as progress (required_movement_angle 0.35).
+    # The 01:35 stuck-83s goal exposed the flaw: while the drivetrain watchdog
+    # held neutral (robot physically stopped 431 ticks), steering-wiggle +
+    # odom-yaw noise still rotated the pose >0.35 rad per window, so Nav2
+    # thought it was progressing and NEVER triggered recovery — "stuck and
+    # doesn't know it" for 60 s. A real Ackermann maneuver (incl. 3-point
+    # turns) always TRANSLATES the rear axle, so position-only progress is
+    # the honest signal; yaw noise can't fake it. movement_time_allowance 6 s
+    # so recovery (backup/retrace) actually fires on a genuine stall.
     progress_checker:
-      plugin: "nav2_controller::PoseProgressChecker"
-      required_movement_radius: 0.08
-      required_movement_angle: 0.35
-      movement_time_allowance: 10.0  # 20 s let real stalls grind too long
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.10
+      movement_time_allowance: 6.0
 
     goal_checker:
       plugin: "nav2_controller::PositionGoalChecker"
@@ -55,16 +69,49 @@ controller_server:
       # throttle across the deadband jump, now calmed in cmd_vel_to_effort
       # (vel_kp 0.25). 0.30 is a moderate cruise; lower toward 0.2 once the
       # calmed PI is confirmed smooth.
+      # 0.20 (was 0.30 -> 0.25 -> now 0.20, repeated user request 2026-07-03):
+      # accepted trade-off — below ~0.25 m/s yaw authority drops (only ~30% of
+      # requested yaw achieved in the 06-11 logs), so steering will be lazier;
+      # the halved yaw PI gains make that less visible. If it corners too wide
+      # to follow paths, raise back to 0.25 before touching steering gains.
+      # 0.25 (2026-07-04, raised back from the 0.17 panic-era value): with
+      # lunges/tracking solved (err 0.05), speed is a free choice — and the
+      # data picks 0.25: steering wind-in needs >=0.25 m/s (June logs: only
+      # ~30% yaw achieved below), and 0.25 sits mid-band on the effort map
+      # (raw ~0.57) with maximum PI margin both ways.
+      # 0.30 (2026-07-04 19:26 trace — THE OBSERVABILITY FLOOR): at 0.22-0.25
+      # m/s consecutive lidar scans differ by ~2 cm = ICP's noise floor, so
+      # measured speed bounced 0<->0.27 under CONSTANT effort and every
+      # safety layer (interlock/kick/watchdog) reacted to hallucinations.
+      # The robot must cruise where its only speed sensor can actually see:
+      # >= ~0.3 m/s. Do not lower this below 0.28 while lidar ICP is the
+      # speed feedback — it commands the robot into its own blind spot.
       desired_linear_vel: 0.30
       # Longer lookahead (was 0.45/0.30): RPP has no curvature limit, so a short
       # carrot makes it demand tight turns to snap back when off-path -> bridge
       # clamps to full lock -> oversteer. A farther carrot = gentler corrections,
       # curvature demands stay nearer the planned (followable) path.
       lookahead_dist: 0.65
-      min_lookahead_dist: 0.45
+      # 0.35 (was 0.45, 2026-07-03): at 0.2 m/s the carrot sat far enough
+      # ahead to jump PAST Reeds-Shepp cusps, skipping reversal legs (the
+      # documented RPP-on-Ackermann failure, nav2 #4757) — bad 3-point
+      # turns. Closer carrot commits to each maneuver leg; if straight-line
+      # weave returns, this is the number that did it.
+      min_lookahead_dist: 0.35
       max_lookahead_dist: 0.90
       lookahead_time: 2.0
       use_velocity_scaled_lookahead_dist: true
+      # Steering-lag compensation (2026-07-04): the linkage needs ~1 s to
+      # wind in, and no Jazzy controller models that. Decouple the CURVATURE
+      # carrot from the tracking carrot and push it ahead — steering orders
+      # arrive ~3 s before the curve at 0.25 m/s, so wheels are wound in by
+      # the time the turn starts. (Anticipation as lag compensation.)
+      # REVERTED (2026-07-04): the fixed-curvature-lookahead experiment
+      # produced two runs of collapsed/zero curvature commands (0.7 washed
+      # curves to 0.23; 0.45 produced cmd_w == 0 all run). The steering-lag
+      # anticipation idea is retired on Jazzy RPP; lag handling stays with
+      # slower cruise + the yaw PI, pending the Nav2-upgrade milestone.
+      use_fixed_curvature_lookahead: false
       # CRITICAL for Ackermann: never try to rotate in place.
       use_rotate_to_heading: false
       allow_reversing: true
@@ -78,16 +125,37 @@ controller_server:
       # odom_v<0.15 only ~30% of requested yaw achieved, 99% steer saturation at the old
       # 0.12 floor; ~63% achieved at 0.30+ m/s). Floor at 0.25 also clears the throttle
       # deadband (~0.19 m/s minimum real speed), so commanded speed is actually obeyed.
-      regulated_linear_scaling_min_speed: 0.25
+      regulated_linear_scaling_min_speed: 0.27   # kept just under the 0.30 cruise (and above the ~0.25 odom observability floor)
       transform_tolerance: 1.5
-      min_approach_linear_velocity: 0.10
+      # 0.15 (was 0.10, 2026-07-03): 0.10 mapped to raw efforts BELOW both
+      # drivetrain engagement thresholds — approach/cusp creep commanded
+      # motion the hardware physically can't produce (8-10 s hangs at
+      # 3-point-turn cusps). Command only speeds the drivetrain can do.
+      min_approach_linear_velocity: 0.15
       approach_velocity_scaling_dist: 0.6
-      # 1.0 (was 1.5): at 0.2 m/s the 1.5 s horizon halted for anything within
-      # ~30 cm of the projected path — 1204 collision-ahead halts on 2026-06-11,
-      # mostly grazing walls while reversing in the tight zones.
-      max_allowed_time_to_collision_up_to_carrot: 1.0
-      # If still stuck with "collision ahead" on open path, set false (less safe outdoors).
-      use_collision_detection: true
+      # 0.45 (1.5 -> 1.0 -> now): see use_collision_detection note — the
+      # projection horizon is the false-halt dial; 0.45 s ~= 11 cm of arc.
+      max_allowed_time_to_collision_up_to_carrot: 0.45
+      # Short-horizon TRUE (2026-07-04 final): fully OFF caused hits — CM's
+      # static box can't cover the nose swinging through turns, and nothing
+      # predicted. Fully ON at 1.0 s caused 326-501 transient-aim halts.
+      # 0.45 s (~11 cm arc at cruise) is the measured middle: too short to
+      # clip walls during steering wind-in, long enough to brake for real
+      # obstacles. CM remains the proximity backstop.
+      # OFF (2026-07-05 00:06 session): the check KILLED EVERY REVERSE LEG —
+      # 73 collision-ahead halts, 100% on reverse (18 during reverse cmds,
+      # 55 in the self-perpetuating halt loop, 0 during forward). Mechanism:
+      # reverse legs start nosed-up to an obstacle, RPP evaluates the swept
+      # footprint FROM THE CURRENT POSE (front bumper already in lethal/
+      # inflated cost) -> "in collision" before the arc starts -> the escape
+      # is vetoed. Same direction-blind deadlock as the old CM stop box, one
+      # layer up; Jazzy RPP has no fix (Lyrical does). The CM velocity
+      # polygons (fwd + rear, probe-verified 2026-07-04) are the designed
+      # replacement and speed is now regulated at 0.30 — the "charging at
+      # obstacles" era that justified this check is over. WATCH FOR: nose-
+      # swing clipping in tight forward turns (the reason it was kept); if
+      # that returns, the fix is footprint/inflation, not re-enabling this.
+      use_collision_detection: false
 
 planner_server:
   ros__parameters:
@@ -132,6 +200,12 @@ planner_server:
       # Flip-flop risk (64 candidates flipping cheapest between replans, seen
       # 06-12 at reverse_penalty 2.0) is suppressed now by reverse_penalty 3.0 +
       # change_penalty 0.25 + 0.33 Hz replan. If it returns, raise reverse_penalty.
+      # REVERTED to ALL_DIRECTION (2026-07-02 23:20): BIDIRECTIONAL was tried
+      # for one session to honor the goal-arrow heading and did exactly what
+      # this comment warned -- "no valid path" went 3/evening -> 10/session,
+      # which read as "robot is stuck and won't recover" (recoveries can't fix
+      # an unplannable goal). Arrow alignment loses to reachability; the
+      # reverse_penalty forward bias still makes most arrivals nose-first.
       goal_heading_mode: "ALL_DIRECTION"
       # ALL_DIRECTION creates one goal per angle bin (64); analytic expansion
       # coarse-checks every 8th, fine-checks the rest near convergence.
@@ -153,6 +227,10 @@ planner_server:
       # radius (~1.5 m) and plannability — at 1.5 Smac logged 25 "no valid
       # path" in tight zones on 2026-06-11 (R=1.5 arcs don't fit there).
       # Peak wound-in kappa ~0.9 (R~1.1) supports 1.3; the yaw PI covers the gap.
+      # LAUNCH-OVERRIDDEN since 2026-07-04: navigation.launch.py derives the
+      # real value at every start from auto_calib's measured steering gains
+      # (worst side wins, clamped [1.3, 4.0]) — see _learned_min_turning_radius.
+      # This 1.3 is the fallback/floor when no calibration data exists.
       minimum_turning_radius: 1.3
       # Was 1.0 (user request), but drivetrain takes ~1.3 s to actually change
       # direction (2026-06-11 logs) — rapid Reeds-Shepp cusps thrash. Make
@@ -161,7 +239,23 @@ planner_server:
       # (depth_floor_scan /camera/scan is a +/-57 deg front arc; the robot is
       # blind to sub-lidar-height obstacles behind), so prefer driving where it
       # can see. Reverse still available for 3-point turns when clearly cheaper.
-      reverse_penalty: 3.0
+      # 4.5 (was 3.0, user request 2026-07-03): stronger forward preference —
+      # goal heading stays free (ALL_DIRECTION) but reverse legs cost 4.5x
+      # forward, so plans reverse only when clearly necessary (tight 3-point
+      # turns), never as a convenience. Rationale unchanged: floor-obstacle
+      # sensing is forward-only. If tight-zone "no valid path" appears, come
+      # back down toward 3.5 before touching anything else.
+      # 2.5 (was 4.5, 2026-07-05 01:5x): 4.5 dates from when reverse was
+      # broken/blind (July 3) and deliberately made the planner avoid it —
+      # result: giant forward U-turn loops (two R=1.3 arcs, 4 m of driving
+      # for a goal 1.5 m away, user screenshot) instead of compact 3-point
+      # turns, because a loop at 4.5x-cheap-forward always beat a cusp path.
+      # Reverse is now fixed (esc_rev_scale, cusp steering pre-aim, rear stop
+      # polygon, gentle backup speed), so price it as a normal maneuver:
+      # 2.5 keeps a real forward bias (floor sensing is still forward-only)
+      # but lets a 0.5 m reverse leg beat a 4 m loop. If plan direction
+      # flip-flopping returns, raise change_penalty first, not this.
+      reverse_penalty: 2.5
       # Penalize direction changes in the search: 0.0 made Reeds-Shepp shunts
       # free, so plans realign heading via back-and-forth even in open space
       # (2026-06-11 log: 93 cusps, 55.8 m driven for 2.2 m net). Goal heading
@@ -170,6 +264,13 @@ planner_server:
       non_straight_penalty: 1.2
       cost_penalty: 2.0
       analytic_expansion_ratio: 3.5
+      # 6.0 (2026-07-04, masterplan T0): we never set this and the default is
+      # 3.0 m — the docs require >= 4-5x minimum_turning_radius (1.3 m -> 5.2-
+      # 6.5 m) "or planning times will begin to spike". Analytic expansion is
+      # how Hybrid-A* actually reaches the goal; with the max length below one
+      # full turning arc it kept failing near walls and in tight zones, which
+      # showed up as part of the "no valid path" / planning-time spikes.
+      analytic_expansion_max_length: 6.0
       smooth_path: true
 
 behavior_server:
@@ -192,6 +293,107 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 1.5
 
+collision_monitor:
+  ros__parameters:
+    # Safety layer replacing RPP's projection check (2026-07-04, see
+    # FollowPath.use_collision_detection note): stop/slowdown polygons on
+    # ACTUAL sensor points — no velocity-arc projection, hence immune to
+    # the transient-aim false halts. Sits between /cmd_vel_nav (controllers)
+    # and /cmd_vel_safe (cmd_vel_to_effort). NOT action_type "approach" —
+    # approach projects arcs exactly like RPP and would resurrect the bug.
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "/cmd_vel_nav"
+    cmd_vel_out_topic: "/cmd_vel_safe"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.5
+    # 1.5 (was 0.5, 2026-07-04): /camera/scan is stamped at depth CAPTURE
+    # time and the floor pipeline adds ~0.55 s — 0.5 declared it invalid and
+    # CM's invalid-source policy STOPPED THE ROBOT PERMANENTLY ("never
+    # moves"). 1.5 accommodates the camera pipeline + floor-scan respawn
+    # gaps. Staleness cost at 0.25 m/s: a low obstacle is seen ~15-35 cm
+    # late — the stop zone's job is last-resort; the costmap still handles
+    # avoidance with the same data.
+    source_timeout: 1.5
+    base_shift_correction: false   # true stalls against 10 Hz lidar odom (2026-06 finding)
+    stop_pub_timeout: 2.0
+    enable_stamped_cmd_vel: true
+    polygons: ["stop_zone", "slow_zone"]
+    stop_zone:
+      # velocity_polygon (was plain polygon, 2026-07-04): the single box was
+      # DIRECTION-BLIND — an obstacle touching the front bumper sat inside it
+      # permanently, so CM zeroed EVERY command including the reverse escape
+      # (retrace publishes to /cmd_vel_nav too) -> post-collision deadlock,
+      # "robot won't move off an obstacle no matter the goal". Now the checked
+      # box follows commanded direction: forward cmds check the front box,
+      # reverse cmds check a rear box that ENDS 5 cm SHORT of the front
+      # bumper (0.30 < footprint front 0.35), so a touching front obstacle
+      # cannot veto backing away — and vice versa for rear contact.
+      type: "velocity_polygon"
+      action_type: "stop"
+      min_points: 3
+      holonomic: false
+      # First matching velocity range wins; together they cover all commands
+      # (forward includes v=0 so a zero command always matches something).
+      velocity_polygons: ["forward", "backward"]
+      forward:
+        # Front half only: x rear edge at the REAR AXLE (0.0), not behind it —
+        # forward motion cannot hit a point behind the axle, and covering it
+        # meant a wall the robot had BACKED into vetoed the forward escape.
+        # FRONT REACH 0.53 (was 0.40, 2026-07-05): with RPP's predictive
+        # collision braking OFF (use_collision_detection false, to stop the
+        # reverse-veto), this box is the ONLY forward brake — and at 0.40 it
+        # was just 5 cm past the 0.35 bumper. At 0.30 m/s + ~0.5 s camera lag
+        # + 10 Hz the robot can't stop in 5 cm, so it drove through it. 0.53 =
+        # ~18 cm margin ≈ 0.6 s reaction, enough to actually stop. Direction-
+        # aware, so this does NOT touch reverse escapes (rear box below).
+        # Sides ±0.18 (was 0.17): the nose sweeps out ~1 cm in tight turns.
+        points: "[[0.40, 0.17], [0.40, -0.17], [0.0, -0.17], [0.0, 0.17]]"
+        linear_min: 0.0
+        linear_max: 10.0
+        theta_min: -10.0
+        theta_max: 10.0
+      backward:
+        # Rear half only: front edge at the rear axle (0.0). The first cut
+        # extended this to x=0.30 "just short of the bumper" — but a RAMMED
+        # front obstacle intrudes past the bumper line (contact points at
+        # x<0.30, verified in probe), so it still vetoed the reverse escape:
+        # the exact post-collision deadlock this split exists to fix.
+        # Reversing cannot hit anything forward of the rear axle; keep the
+        # box strictly behind it. Rear -0.16 = 8 cm margin (reverse is blind
+        # to low obstacles, so more than the front's 5 cm).
+        points: "[[0.0, 0.17], [0.0, -0.17], [-0.16, -0.17], [-0.16, 0.17]]"
+        linear_min: -10.0
+        linear_max: 0.0
+        theta_min: -10.0
+        theta_max: 10.0
+      visualize: true
+      polygon_pub_topic: "collision_stop_zone"
+    slow_zone:
+      type: "polygon"
+      action_type: "slowdown"
+      # 0.70 m reach + 0.55 cut (2026-07-05, was 0.48 m / 0.75): the slow zone
+      # must bleed speed BEFORE the stop box so the stop has something gentle
+      # to catch — with predictive braking off, 0.75 (barely slowing) let the
+      # robot arrive at the bumper at full 0.30 m/s. 0.70 m forward gives ~0.7 s
+      # of slowdown before the 0.53 m stop box; 0.55 ratio drops cruise to
+      # ~0.17 m/s there, a speed the bumper CAN stop in its margin. The old
+      # 0.62 m "always held a wall -> permanent half speed" fear is answered
+      # by the harder-but-shorter-lived cut + the good 0.068 m path tracking
+      # (robot no longer hugs walls). If it crawls indoors, trim reach to 0.60.
+      slowdown_ratio: 0.75
+      points: "[[0.48, 0.19], [0.48, -0.19], [-0.16, -0.19], [-0.16, 0.19]]"
+      min_points: 4
+      visualize: true
+      polygon_pub_topic: "collision_slow_zone"
+    observation_sources: ["scan", "camera_scan"]
+    scan:
+      type: "scan"
+      topic: "/scan_cm"   # self-returns stripped (see scan_cm_range_filter)
+    camera_scan:
+      type: "scan"
+      topic: "/camera/scan"   # low obstacles the lidar can't see
+
 lifecycle_manager_navigation:
   ros__parameters:
     autostart: true
@@ -200,6 +402,7 @@ lifecycle_manager_navigation:
       - planner_server
       - behavior_server
       - bt_navigator
+      - collision_monitor
 
 local_costmap:
   local_costmap:
@@ -222,10 +425,19 @@ local_costmap:
       # clipped obstacles the planner thought were clear). Cost: parked ~1 cm
       # from a wall the side may clip inflation again (along-wall stalls) — the
       # recovery tree now backs out first, which is the correct escape for that.
-      footprint: "[[-0.09, -0.15], [-0.09, 0.15], [0.36, 0.15], [0.36, -0.15]]"
-      plugins: ["lidar_layer", "denoise_layer", "inflation_layer"]
-      # Camera removed from LOCAL: depth_floor_scan front arc (±57°) was the dotted
-      # perimeter ghost. Global costmap still uses /camera/scan for near low obstacles.
+      # Inset 1 cm from the URDF outline on user request (2026-07-04): the
+      # full outline read as oversized in practice (planner refused gaps the
+      # robot fits through). Trade-off: ~1 cm less collision margin per side.
+      footprint: "[[-0.08, -0.14], [-0.08, 0.14], [0.35, 0.14], [0.35, -0.14]]"
+      # camera_layer RESTORED to local (2026-07-03): it was removed when the
+      # depth_floor_scan front arc painted the dotted perimeter ghost — that
+      # artifact is now filtered at the source (ring suppression + far-arc
+      # dots + min_obstacle_height 0.065 fixed 2026-07-02). Without it, low
+      # obstacles never reached the local costmap, so RPP's collision check
+      # and local avoidance were blind to exactly the objects only the camera
+      # can see. If the ghost returns, fix depth_floor_scan thresholds — do
+      # not remove the layer again.
+      plugins: ["lidar_layer", "camera_layer", "denoise_layer", "inflation_layer"]
       lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -244,6 +456,27 @@ local_costmap:
           obstacle_min_range: 0.22
           obstacle_max_range: 8.0
           observation_persistence: 0.0
+      camera_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: true
+        observation_sources: camera_scan
+        camera_scan:
+          topic: /camera/scan
+          max_obstacle_height: 0.20
+          clearing: true
+          marking: true
+          inf_is_valid: true
+          obstacle_max_range: 1.0   # match depth_floor_scan max_mark_range
+          data_type: "LaserScan"
+          raytrace_min_range: 0.15
+          # 1.5 LOCAL (2026-07-04, second pass): the first fix set 0.9 here
+          # too and sticky local marks caused 575 RPP collision-halts in one
+          # run — the controller must stay FLUID (the rolling window forgets
+          # naturally anyway). The anti-trap memory lives in the GLOBAL
+          # costmap (raytrace 0.9 there), which is what reroutes the planner
+          # around remembered low obstacles.
+          raytrace_max_range: 1.5
       denoise_layer:
         plugin: "nav2_costmap_2d::DenoiseLayer"
         enabled: true
@@ -265,7 +498,10 @@ global_costmap:
       transform_tolerance: 1.5
       # Match local_costmap planning footprint (see comment there): full URDF
       # outline including wheels.
-      footprint: "[[-0.09, -0.15], [-0.09, 0.15], [0.36, 0.15], [0.36, -0.15]]"
+      # Inset 1 cm from the URDF outline on user request (2026-07-04): the
+      # full outline read as oversized in practice (planner refused gaps the
+      # robot fits through). Trade-off: ~1 cm less collision margin per side.
+      footprint: "[[-0.08, -0.14], [-0.08, 0.14], [0.35, 0.14], [0.35, -0.14]]"
       resolution: 0.1
       track_unknown_space: true
       # Rolling 12 m window instead of the full SLAM map: Smac cost grows with
@@ -313,7 +549,11 @@ global_costmap:
           obstacle_max_range: 1.0   # match depth_floor_scan max_mark_range (near low obs only)
           data_type: "LaserScan"
           raytrace_min_range: 0.15
-          raytrace_max_range: 1.5
+          # 0.9 (was 1.5, 2026-07-04): clear only where the camera can SEE
+          # (low obstacles detectable to ~1.0 m) — see local camera_scan note;
+          # this is what makes GLOBAL memory of low obstacles survive backing
+          # away, so the planner routes AROUND rediscovered traps.
+          raytrace_max_range: 0.9
           obstacle_min_range: 0.15
           observation_persistence: 0.0
       denoise_layer:

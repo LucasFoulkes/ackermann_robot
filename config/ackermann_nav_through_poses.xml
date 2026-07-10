@@ -7,19 +7,28 @@
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
         <!-- Pre-plan TF settle: 1.0 s, was 3.0 (see ackermann_nav_to_pose.xml). -->
         <Wait wait_duration="1.0"/>
-        <!-- 0.33 Hz (see ackermann_nav_to_pose.xml history). -->
-        <RateController hz="0.33">
-          <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
+        <!-- Replan only if path invalid or goal set changed (2026-07-04,
+             masterplan T0 — rationale in ackermann_nav_to_pose.xml). -->
+        <RateController hz="1.0">
+          <Fallback>
             <ReactiveSequence>
-              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"/>
-              <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              <Inverter>
+                <GlobalUpdatedGoal/>
+              </Inverter>
+              <IsPathValid path="{path}"/>
             </ReactiveSequence>
-            <Sequence name="PlannerRecovery">
-              <ClearEntireCostmap name="ClearLocalCostmap-Planner" service_name="local_costmap/clear_entirely_local_costmap"/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Planner" service_name="global_costmap/clear_entirely_global_costmap"/>
-              <Wait wait_duration="1.0"/>
-            </Sequence>
-          </RecoveryNode>
+            <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
+              <ReactiveSequence>
+                <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"/>
+                <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              </ReactiveSequence>
+              <Sequence name="PlannerRecovery">
+                <ClearEntireCostmap name="ClearLocalCostmap-Planner" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Planner" service_name="global_costmap/clear_entirely_global_costmap"/>
+                <Wait wait_duration="1.0"/>
+              </Sequence>
+            </RecoveryNode>
+          </Fallback>
         </RateController>
         <RecoveryNode number_of_retries="2" name="FollowPath">
           <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
@@ -40,7 +49,7 @@
           </Sequence>
           <!-- Reverse first (nose-in stalls), faster than reverse stiction; see
                ackermann_nav_to_pose.xml for rationale. -->
-          <BackUp backup_dist="0.50" backup_speed="0.20" error_code_id="{backup_error_code}"/>
+          <BackUp backup_dist="0.50" backup_speed="0.28" error_code_id="{backup_error_code}"/>
           <DriveOnHeading dist_to_travel="0.40" speed="0.14" time_allowance="15"/>
           <Wait wait_duration="3.0"/>
         </RoundRobin>

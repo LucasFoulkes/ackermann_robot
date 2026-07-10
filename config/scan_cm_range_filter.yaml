@@ -1,0 +1,16 @@
+scan_cm_range_filter:
+  ros__parameters:
+    # Strip the lidar's SELF-RETURNS (robot mast/cabling at ~0.07 m, 34
+    # points measured 2026-07-04) before the collision monitor sees the
+    # scan — CM in Jazzy has no obstacle_min_range like the costmaps do,
+    # so unfiltered self-hits sat inside the stop polygon and held the
+    # robot stopped forever. 0.22 matches the costmaps' min range.
+    filter1:
+      name: range
+      type: laser_filters/LaserScanRangeFilter
+      params:
+        use_message_range_limits: false
+        lower_threshold: 0.22
+        upper_threshold: 12.0
+        lower_replacement_value: .nan
+        upper_replacement_value: .inf

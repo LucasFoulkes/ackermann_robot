@@ -46,6 +46,8 @@ setup(
             'system_stats = ackermann_robot.system_stats:main',
             'scan_throttle = ackermann_robot.scan_throttle:main',
             'auto_calib = ackermann_robot.auto_calib:main',
+            'retrace_recovery = ackermann_robot.retrace_recovery:main',
+            'drive_score = ackermann_robot.drive_score:main',
         ],
     },
 )

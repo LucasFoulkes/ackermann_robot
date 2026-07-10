@@ -7,14 +7,34 @@ use_floor_scan:=true (default): D435i RANSAC -> /camera/scan in local costmap.
 Diagnostics: [system_stats] in this terminal.
 RViz: nav2.rviz, Fixed Frame map, Nav2 Goal tool.
 """
+import json
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _learned_min_turning_radius(default=1.3):
+    """Planner turning radius. DISABLED the auto-derivation 2026-07-05.
+
+    History: 2026-07-04 this derived min_turning_radius from auto_calib's
+    persisted steer_pairs, to catch a servo transplant that seemed to halve
+    right-side curvature. But the gain estimate it reads — kappa_odom/eff_steer
+    = (odom_w/odom_v)/eff_steer — is NOISE-DOMINATED at maneuvering speeds
+    (odom_v in the denominator): for the SAME good linkage the measured gain
+    spread is 0.06-1.50 slow / 0.14-1.08 fast. That noise made the derived
+    radius jump 1.55-4.0 m between sessions and cripple path planning (wide
+    unfollowable arcs, "terrible paths", stuck). The user has verified the
+    linkage is mechanically fine, so the honest planner input is the MEASURED
+    geometry: min_turning_radius 1.3 (from the June kappa-at-lock logs), a
+    constant. Re-enable an auto-derivation only from a CLEAN gain measurement
+    (active dither at steady speed, M3) — not from raw driving odometry.
+    """
+    return default, f"min_turning_radius {default} m (fixed; linkage verified good)"
 
 
 def _launch_setup(context, *args, **kwargs):
@@ -47,7 +67,9 @@ def _launch_setup(context, *args, **kwargs):
             condition=condition,
         )
 
-    actions = []
+    turn_radius, turn_reason = _learned_min_turning_radius()
+
+    actions = [LogInfo(msg=f"[planner honesty] {turn_reason}")]
     slam_params = os.path.join(pkg, "config", "slam_toolbox_online_async.yaml")
     # 5 Hz (was 8): slam_toolbox gates by minimum_travel_distance anyway, and the
     # extra scans just piled up in its TF message filter during CPU spikes —
@@ -118,23 +140,45 @@ def _launch_setup(context, *args, **kwargs):
         ))
     actions.append(include("slam.launch.py", [("slam_params_file", slam_params)]))
     if LaunchConfiguration("auto_calib").perform(context) == "true":
-        # Observe-only drivetrain self-calibration (~2% core): learns breakaway
-        # deadband + steady (u,v) pairs from normal driving, reports every 15 s.
-        # Unlike drive_logger (raw CSV for offline reading), this computes live
-        # fits; nothing feeds control yet.
+        # Drivetrain self-calibration (~2% core): learns breakaway from normal
+        # driving, persists across sessions (~/.ros/auto_calib_state.json),
+        # and SINCE 2026-07-03 FEEDS CONTROL: cmd_vel_to_effort seeds its
+        # stiction kick from /auto_calib/params (plausibility-guarded).
+        # Disabling this only loses learning; seeding falls back to ramping.
         actions.append(Node(
             package="ackermann_robot",
             executable="auto_calib",
             name="auto_calib",
             output="screen",
+            respawn=True,
+            respawn_delay=2.0,
         ))
     actions.extend([
+        # Retrace recovery: BackUp-compatible action server ("retrace") that
+        # reverses along the robot's own recorded forward path instead of
+        # straight back (floor-obstacle sensing is forward-only). The BT's
+        # <BackUp server_name="retrace"> in ackermann_nav_to_pose.xml targets
+        # it, so this node MUST be up for recoveries to work.
+        Node(
+            package="ackermann_robot",
+            executable="retrace_recovery",
+            name="retrace_recovery",
+            output="screen",
+            respawn=True,
+            respawn_delay=2.0,
+        ),
+        # ACTUATION CHAIN: respawn is SAFETY-CRITICAL here (2026-07-03: a
+        # driver killed without cleanup left the PCA9685 free-running its
+        # last PWM -> motor ran with no software in control). A respawned
+        # driver immediately re-arms and writes neutral on stale commands.
         Node(
             package="ackermann_robot",
             executable="cmd_vel_to_effort",
             name="cmd_vel_to_effort",
             output="screen",
             parameters=[effort_yaml, {"closed_loop": closed_loop}],
+            respawn=True,
+            respawn_delay=1.0,
         ),
         Node(
             package="ackermann_robot",
@@ -142,12 +186,19 @@ def _launch_setup(context, *args, **kwargs):
             name="actuator_driver",
             output="screen",
             parameters=[driver_yaml],
+            respawn=True,
+            respawn_delay=1.0,
         ),
         Node(
             package="nav2_controller",
             executable="controller_server",
             name="controller_server",
             output="screen",
+            # NOT coupled to the learned radius (2026-07-04 23:47 lesson):
+            # this RPP param regulates SPEED in curves — tying it to a large
+            # learned radius made every gentle arc scale toward min speed
+            # (back into the odometry blind zone). Speed regulation keeps the
+            # yaml value; only the PLANNER gets the learned geometry.
             parameters=[nav2_params],
             remappings=[("cmd_vel", "/cmd_vel_nav")],
         ),
@@ -156,7 +207,9 @@ def _launch_setup(context, *args, **kwargs):
             executable="planner_server",
             name="planner_server",
             output="screen",
-            parameters=[nav2_params],
+            parameters=[nav2_params, {
+                "GridBased.minimum_turning_radius": turn_radius,
+            }],
         ),
         Node(
             package="nav2_behaviors",
@@ -175,6 +228,32 @@ def _launch_setup(context, *args, **kwargs):
                 "default_nav_to_pose_bt_xml": nav2_bt_xml,
                 "default_nav_through_poses_bt_xml": nav2_through_poses_bt_xml,
             }],
+        ),
+        # Self-return filter for the collision monitor: strips the lidar's
+        # own-body hits (mast at ~0.07 m) that would sit inside the stop
+        # polygon forever. CM's lidar source reads /scan_cm. Respawns —
+        # if this dies, CM loses its lidar source and stops the robot.
+        Node(
+            package="laser_filters",
+            executable="scan_to_scan_filter_chain",
+            name="scan_cm_range_filter",
+            output="screen",
+            parameters=[os.path.join(pkg, "config", "scan_cm_range_filter.yaml")],
+            remappings=[("scan", "/scan"), ("scan_filtered", "/scan_cm")],
+            respawn=True,
+            respawn_delay=1.0,
+        ),
+        # Safety layer (2026-07-04): proximity-based stop/slowdown between
+        # the controllers (/cmd_vel_nav) and actuation (/cmd_vel_safe) —
+        # replaces RPP's projection-based collision check (see nav2_params
+        # FollowPath note). MUST be in lifecycle node_names or the cmd_vel
+        # pipeline is silently dead.
+        Node(
+            package="nav2_collision_monitor",
+            executable="collision_monitor",
+            name="collision_monitor",
+            output="screen",
+            parameters=[nav2_params],
         ),
         Node(
             package="nav2_lifecycle_manager",

@@ -58,6 +58,12 @@ class ActuatorDriver(Node):
         # reverse — linear map -1..1 -> neutral +/- half, same shape as steering.
         self.esc_ch = self.param("esc_channel", 14)
         self.esc_inverted = bool(self.param("esc_inverted", False))
+        # Robot-frame REVERSE authority scale (2026-07-05, user experiment):
+        # scales the final reverse pulse deviation from neutral. 0.5 = "send
+        # half the signal" for all reverse output (feedforward+kick+trim).
+        # Applied in the robot frame BEFORE esc_inverted, so it always means
+        # robot-backward regardless of wiring.
+        self.esc_rev_scale = float(self.param("esc_rev_scale", 1.0))
         esc_min = self.param("esc_min_tick", 205)
         esc_max = self.param("esc_max_tick", 410)
         self.esc_neutral = self.param("esc_neutral_tick", 307)
@@ -82,11 +88,38 @@ class ActuatorDriver(Node):
         self._rev_phase = None      # None | ["tap"|"gap", end_ns]
         self._last_rev_out_ns = 0
 
+        # Throttle sigma-delta dither (2026-07-04, masterplan T1 software leg):
+        # the ESC's usable rolling band is ~2 PCA9685 ticks wide, so round()
+        # quantization makes intermediate speeds UNCOMMANDABLE — the measured
+        # cause of the lunge limit cycle. First-order error feedback on the
+        # ideal (float) tick: the rounding error carries into the next 50 Hz
+        # frame, so the ESC sees e.g. 331,331,332,331... and the motor's
+        # mechanical time constant (>>20 ms) averages it to 331.25. Standard
+        # digital-power technique (quantization limit-cycle literature); buys
+        # ~2 bits of effective resolution with zero hardware. Neutral is NEVER
+        # dithered (must be exact for the ESC's brake/reverse detection) and
+        # the accumulator resets there. Steering is never dithered (servo
+        # would buzz). esc_dither: false restores plain rounding.
+        self.esc_dither = bool(self.param("esc_dither", True))
+        self._sd_err = 0.0
+
+        # Servo idle-relax: a hobby servo holding a deflection under load
+        # (servo saver + tire bore) hums at its internal PWM loudly — logs
+        # 2026-07-03 00:00 show 17 s parked at FULL LOCK. Holding steering
+        # position while the drive is at neutral serves nothing (dry steering
+        # can't track the real angle anyway), so after steer_relax_s of
+        # drive-neutral + unchanged steering we stop the steering pulse
+        # (duty 0 -> servo limp and silent); any new motion re-engages it.
+        self.steer_relax = bool(self.param("steer_relax", True))
+        self.steer_relax_ns = int(self.param("steer_relax_s", 2.0) * 1e9)
+
         self.cmd = (0.0, 0.0)
         now = self.get_clock().now().nanoseconds
         self.last_cmd_ns = now
         self.last_forward_ns = now - self.reverse_delay_ns
         self.last_reverse_ns = now - self.reverse_delay_ns
+        self._last_steer_active_ns = now
+        self._last_steer_cmd = 0.0
 
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(
@@ -132,12 +165,33 @@ class ActuatorDriver(Node):
         elif throttle < 0.0 and now >= self.last_forward_ns + self.reverse_delay_ns:
             self.last_reverse_ns = now
             esc_throttle = self._reverse_throttle(throttle, now)
+        if esc_throttle < 0.0:
+            esc_throttle *= self.esc_rev_scale   # robot-frame reverse scale
         if self.esc_inverted:
             esc_throttle = -esc_throttle
-        esc_tick = round(self.esc_neutral + esc_throttle * self.esc_half_range)
+        ideal_tick = self.esc_neutral + esc_throttle * self.esc_half_range
+        if self.esc_dither and esc_throttle != 0.0:
+            # First-order sigma-delta: quantize ideal+carried error, carry the
+            # new error. Average output tick converges on ideal_tick.
+            acc = ideal_tick + self._sd_err
+            esc_tick = round(acc)
+            self._sd_err = acc - esc_tick
+        else:
+            esc_tick = round(ideal_tick)
+            self._sd_err = 0.0
+
+        # Idle-relax bookkeeping: "active" = drive engaged or steering moved.
+        if esc_tick != self.esc_neutral or abs(steering - self._last_steer_cmd) > 0.02:
+            self._last_steer_active_ns = now
+        self._last_steer_cmd = steering
+        relax = (self.steer_relax
+                 and now - self._last_steer_active_ns > self.steer_relax_ns)
 
         try:
-            self._set(self.steering_ch, steering_tick)
+            if relax:
+                self._set(self.steering_ch, 0)   # no pulse -> servo limp, silent
+            else:
+                self._set(self.steering_ch, steering_tick)
             self._set(self.esc_ch, esc_tick)
         except OSError as e:
             self.get_logger().error(f"I2C write failed: {e}", throttle_duration_sec=1.0)

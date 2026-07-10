@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Drive to goal: live SLAM + Nav2 + motor control (main outdoor stack).
+"""Drive to goal: live SLAM + Nav2 + motor control (main stack).
 
-  C1 /scan -> icp_odometry + IMU -> EKF -> /odom  (use_ekf:=false skips EKF)
+  C1 /scan -> rtabmap icp_odometry (/odom_icp) + D435i gyro -> EKF -> /odom
   slam_toolbox -> /map + map->odom
-  Nav2 -> cmd_vel_to_effort (deadband yaml) -> driver
+  Nav2 -> cmd_vel_to_effort (learned-breakaway kick, F/R maps) -> driver
+  auto_calib learns breakaway live and seeds the kick (persists across runs)
 
 On the Pi (default — SLAM, loop closure, EKF+IMU, D435i floor scan):
   ros2 launch ackermann_robot drive.launch.py

@@ -3,29 +3,51 @@
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="12" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
+        <!-- FollowPath (RPP). INCIDENT 2026-07-04: this said "MPPI" for an
+             hour after the MPPI plugin was retired from controller_server —
+             every goal failed instantly ("controller name MPPI does not
+             exist") and it presented as 'robot never moves/steers'. The BT
+             default and controller_plugins MUST change together. -->
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
         <!-- Pause before plan so map->odom can catch up after prior goal / map resize.
              Was 3.0 s (99%-CPU era insurance) = the entire goal-to-motion delay;
              TF healthy since the 2026-06-09 perf overhaul, so 1.0 s keeps a margin
              for SLAM map resizes. Restore 3.0 if planner logs TF extrapolation or
-             goal-time "Start occupied" errors return. -->
-        <Wait wait_duration="1.0"/>
-        <!-- 0.33 Hz. History: 0.5 churned maneuvers; 0.2 left the robot standing
-             5 s after hiccups; 0.5 + ALL_DIRECTION flapped drive direction every
-             replan (2026-06-12 13:30). 3 s + BIDIRECTIONAL goal headings is the
-             balance: maneuvers get time to commit, failures wait at most 3 s. -->
-        <RateController hz="0.33">
-          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-            <!-- NO_VALID_PATH on a static map won't clear with global-only; local may
-                 hold phantom obstacles. Fail fast -> outer RoundRobin (drive/backup). -->
-            <Sequence name="PlannerRecovery">
-              <ClearEntireCostmap name="ClearLocalCostmap-Planner" service_name="local_costmap/clear_entirely_local_costmap"/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Planner" service_name="global_costmap/clear_entirely_global_costmap"/>
-              <Wait wait_duration="1.0"/>
-            </Sequence>
-          </RecoveryNode>
+             goal-time "Start occupied" errors return.
+             0.4 (2026-07-03): measured goal->controller-start = 1.06 s, i.e.
+             this Wait WAS the goal-to-motion delay. TF has been healthy for
+             weeks; 0.4 keeps a token margin. Raise if "Start occupied" returns. -->
+        <Wait wait_duration="0.4"/>
+        <!-- REPLAN ONLY IF PATH BECOMES INVALID (2026-07-04, masterplan T0):
+             periodic replanning (0.33 Hz here since June) was the documented
+             cause of oscillating reverse legs — every replan could flip the
+             Reeds-Shepp maneuver choice mid-commit (nav2 #4425: maintainer
+             prescribed exactly this BT change; our own 2026-06-12 flip-flop
+             log agrees). Now: 1 Hz cheap validity CHECK (IsPathValid service
+             on planner_server), replan only when the path is invalid or the
+             goal moved — maneuvers commit to completion. Live-SLAM drift is
+             covered: map->odom shifts that push the path into an obstacle
+             make IsPathValid fail -> replan. -->
+        <RateController hz="1.0">
+          <Fallback>
+            <ReactiveSequence>
+              <Inverter>
+                <GlobalUpdatedGoal/>
+              </Inverter>
+              <IsPathValid path="{path}"/>
+            </ReactiveSequence>
+            <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              <!-- NO_VALID_PATH on a static map won't clear with global-only; local may
+                   hold phantom obstacles. Fail fast -> outer RoundRobin (drive/backup). -->
+              <Sequence name="PlannerRecovery">
+                <ClearEntireCostmap name="ClearLocalCostmap-Planner" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Planner" service_name="global_costmap/clear_entirely_global_costmap"/>
+                <Wait wait_duration="1.0"/>
+              </Sequence>
+            </RecoveryNode>
+          </Fallback>
         </RateController>
         <RecoveryNode number_of_retries="2" name="FollowPath">
           <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
@@ -51,8 +73,13 @@
           <!-- 2) Reverse FIRST: stalls are mostly nose-in (tight corner / wall ahead at
                the curvature limit) — driving forward digs in deeper. 0.5 m gives the
                R=1.5 m planner room for the next attempt; 0.20 m/s clears reverse
-               stiction (0.14 sat at the deadband edge and often never moved). -->
-          <BackUp backup_dist="0.50" backup_speed="0.20" error_code_id="{backup_error_code}"/>
+               stiction (0.14 sat at the deadband edge and often never moved).
+               server_name="retrace" (2026-07-02): retrace_recovery node, same BackUp
+               action but reverses ALONG the recorded forward path instead of straight
+               back — floor-obstacle sensing is forward-only, so the strip just driven
+               is the only ground known clear behind us. Falls back to straight reverse
+               if the breadcrumb trail is dry. Remove server_name to restore stock. -->
+          <BackUp server_name="retrace" backup_dist="0.50" backup_speed="0.28" time_allowance="15" error_code_id="{backup_error_code}"/>
           <!-- 3) Forward if reverse blocked (parallel to a side wall, space ahead). -->
           <DriveOnHeading dist_to_travel="0.40" speed="0.14" time_allowance="15"/>
           <Wait wait_duration="3.0"/>

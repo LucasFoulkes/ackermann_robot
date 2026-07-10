@@ -91,8 +91,15 @@ def generate_launch_description():
                 # robot_localization EKF. KalmanMeasurementNoise up from default
                 # 0.01 -> 0.05 trusts the motion model a bit more (more smoothing);
                 # lower it if odom feels laggy.
+                # Icp/RangeMin 0.25 (2026-07-04 self-return audit): the C1
+                # sees the robot's own mast as a ~34-point arc at 0.07 m —
+                # points RIGIDLY ATTACHED to the sensor that match at zero
+                # displacement in every scan pair, anchoring ICP toward "no
+                # motion". Prime suspect for the historic blind-reverse and
+                # sluggish-onset odometry behaviors.
                 "args": ("--Reg/Force3DoF true --Odom/ResetCountdown 0 "
-                         "--Odom/FilteringStrategy 1 --Odom/KalmanMeasurementNoise 0.1"),
+                         "--Odom/FilteringStrategy 1 --Odom/KalmanMeasurementNoise 0.1 "
+                         "--Icp/RangeMin 0.25"),
             }],
             remappings=[("scan", "/scan"), ("odom", "/odom_icp")],
             arguments=["--ros-args", "--log-level", "icp_odometry:=warn"],
