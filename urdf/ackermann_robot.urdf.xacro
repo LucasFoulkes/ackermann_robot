@@ -13,7 +13,8 @@
   <xacro:property name="body_length" value="0.385"/>
   <xacro:property name="body_width" value="0.300"/>
   <xacro:property name="body_height" value="0.165"/>
-  <xacro:property name="ground_clearance" value="0.030"/>
+  <!-- Place the main body above the tires; wheel top is 2 * wheel_radius. -->
+  <xacro:property name="body_bottom_z" value="${2.0 * wheel_radius}"/>
 
   <!-- Measured running gear. -->
   <xacro:property name="wheelbase" value="0.2775"/>
@@ -27,7 +28,7 @@
   <xacro:property name="body_center_x"
                   value="${(body_rear_x + body_front_x) / 2.0}"/>
   <xacro:property name="body_center_z"
-                  value="${ground_clearance + body_height / 2.0}"/>
+                  value="${body_bottom_z + body_height / 2.0}"/>
 
   <!-- Sensor centers measured from base_link. -->
   <xacro:property name="lidar_x" value="0.237"/>
