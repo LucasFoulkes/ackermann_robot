@@ -1,3 +1,6 @@
+from glob import glob
+from os.path import join
+
 from setuptools import setup
 
 package_name = 'ackermann_robot'
@@ -12,6 +15,7 @@ setup(
             ['resource/' + package_name],
         ),
         ('share/' + package_name, ['package.xml']),
+        (join('share', package_name, 'urdf'), glob('urdf/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

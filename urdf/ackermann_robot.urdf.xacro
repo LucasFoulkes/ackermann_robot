@@ -1,0 +1,126 @@
+<?xml version="1.0"?>
+<robot name="ackermann_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!--
+    Coordinate convention:
+      base_link origin: rear axle center projected onto the ground
+      +X forward, +Y left, +Z up
+
+    The wheels are geometry on base_link. They intentionally have no links or
+    joints because the robot has no wheel position or steering encoders.
+  -->
+
+  <!-- Measured body geometry. -->
+  <xacro:property name="body_length" value="0.385"/>
+  <xacro:property name="body_width" value="0.300"/>
+  <xacro:property name="body_height" value="0.165"/>
+  <xacro:property name="ground_clearance" value="0.030"/>
+
+  <!-- Measured running gear. -->
+  <xacro:property name="wheelbase" value="0.2775"/>
+  <xacro:property name="track_width" value="0.247"/>
+  <xacro:property name="wheel_radius" value="0.060"/>
+  <xacro:property name="wheel_width" value="0.057"/>
+
+  <!-- Body extents relative to the rear axle. -->
+  <xacro:property name="body_rear_x" value="-0.0538"/>
+  <xacro:property name="body_front_x" value="0.3312"/>
+  <xacro:property name="body_center_x"
+                  value="${(body_rear_x + body_front_x) / 2.0}"/>
+  <xacro:property name="body_center_z"
+                  value="${ground_clearance + body_height / 2.0}"/>
+
+  <!-- Sensor centers measured from base_link. -->
+  <xacro:property name="lidar_x" value="0.237"/>
+  <xacro:property name="lidar_z" value="0.165"/>
+  <xacro:property name="camera_x" value="0.2975"/>
+  <xacro:property name="camera_z" value="0.1275"/>
+
+  <material name="robot_orange">
+    <color rgba="1.0 0.35 0.0 1.0"/>
+  </material>
+  <material name="tire_black">
+    <color rgba="0.04 0.04 0.04 1.0"/>
+  </material>
+  <material name="sensor_dark">
+    <color rgba="0.15 0.15 0.17 1.0"/>
+  </material>
+
+  <xacro:macro name="wheel_geometry" params="x y">
+    <visual>
+      <origin xyz="${x} ${y} ${wheel_radius}" rpy="${pi / 2.0} 0 0"/>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+      </geometry>
+      <material name="tire_black"/>
+    </visual>
+    <collision>
+      <origin xyz="${x} ${y} ${wheel_radius}" rpy="${pi / 2.0} 0 0"/>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+      </geometry>
+    </collision>
+  </xacro:macro>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="${body_center_x} 0 ${body_center_z}"/>
+      <geometry>
+        <box size="${body_length} ${body_width} ${body_height}"/>
+      </geometry>
+      <material name="robot_orange"/>
+    </visual>
+    <collision>
+      <origin xyz="${body_center_x} 0 ${body_center_z}"/>
+      <geometry>
+        <box size="${body_length} ${body_width} ${body_height}"/>
+      </geometry>
+    </collision>
+
+    <xacro:wheel_geometry x="0.0" y="${ track_width / 2.0}"/>
+    <xacro:wheel_geometry x="0.0" y="${-track_width / 2.0}"/>
+    <xacro:wheel_geometry x="${wheelbase}" y="${ track_width / 2.0}"/>
+    <xacro:wheel_geometry x="${wheelbase}" y="${-track_width / 2.0}"/>
+
+    <!-- Approximate 4 kg box inertia; replace after weighing the robot. -->
+    <inertial>
+      <origin xyz="${body_center_x} 0 ${body_center_z}"/>
+      <mass value="4.0"/>
+      <inertia
+        ixx="${4.0 / 12.0 * (body_width * body_width + body_height * body_height)}"
+        ixy="0.0"
+        ixz="0.0"
+        iyy="${4.0 / 12.0 * (body_length * body_length + body_height * body_height)}"
+        iyz="0.0"
+        izz="${4.0 / 12.0 * (body_length * body_length + body_width * body_width)}"/>
+    </inertial>
+  </link>
+
+  <!-- Fixed sensor joints are required to publish their measured TF frames. -->
+  <link name="laser">
+    <visual>
+      <geometry>
+        <cylinder radius="0.055" length="0.0413"/>
+      </geometry>
+      <material name="sensor_dark"/>
+    </visual>
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser"/>
+    <origin xyz="${lidar_x} 0 ${lidar_z}" rpy="0 0 ${pi}"/>
+  </joint>
+
+  <link name="camera_link">
+    <visual>
+      <geometry>
+        <box size="0.025 0.090 0.025"/>
+      </geometry>
+      <material name="sensor_dark"/>
+    </visual>
+  </link>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="${camera_x} 0 ${camera_z}" rpy="0 0 0"/>
+  </joint>
+</robot>
