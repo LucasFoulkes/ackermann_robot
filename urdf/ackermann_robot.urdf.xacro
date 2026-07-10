@@ -9,26 +9,18 @@
     joints because the robot has no wheel position or steering encoders.
   -->
 
-  <!-- Measured body geometry. -->
-  <xacro:property name="body_length" value="0.385"/>
-  <xacro:property name="body_width" value="0.300"/>
-  <xacro:property name="body_height" value="0.165"/>
-  <!-- Place the main body above the tires; wheel top is 2 * wheel_radius. -->
-  <xacro:property name="body_bottom_z" value="${2.0 * wheel_radius}"/>
-
   <!-- Measured running gear. -->
   <xacro:property name="wheelbase" value="0.2775"/>
   <xacro:property name="track_width" value="0.247"/>
   <xacro:property name="wheel_radius" value="0.060"/>
   <xacro:property name="wheel_width" value="0.057"/>
 
-  <!-- Body extents relative to the rear axle. -->
-  <xacro:property name="body_rear_x" value="-0.0538"/>
-  <xacro:property name="body_front_x" value="0.3312"/>
-  <xacro:property name="body_center_x"
-                  value="${(body_rear_x + body_front_x) / 2.0}"/>
-  <xacro:property name="body_center_z"
-                  value="${body_bottom_z + body_height / 2.0}"/>
+  <!-- Thin chassis plate: axle-to-axle and between the inner tire faces. -->
+  <xacro:property name="body_length" value="${wheelbase}"/>
+  <xacro:property name="body_width" value="${track_width - wheel_width}"/>
+  <xacro:property name="body_height" value="${wheel_radius}"/>
+  <xacro:property name="body_center_x" value="${wheelbase / 2.0}"/>
+  <xacro:property name="body_center_z" value="${1.5 * wheel_radius}"/>
 
   <!-- Sensor centers measured from base_link. -->
   <xacro:property name="lidar_x" value="0.237"/>
