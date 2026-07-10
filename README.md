@@ -1,88 +1,37 @@
 # ackermann_robot
 
-Ackermann robot on ROS 2 Jazzy: RPLIDAR C1, RF2O odometry, **SLAM Toolbox**, Nav2, PCA9685 drive.
+Clean ROS 2 package retained in the original Git repository so the previous
+implementation remains available in history.
 
-## Drive to goal (main stack)
+The package intentionally contains no nodes, launch files, configuration, or
+robot description yet.
 
-**On the Pi** (lidar + SLAM + Nav2 + motors):
+## Known robot measurements
 
-```bash
-cd /home/luky/ros2_ws
-source install/setup.bash
-ros2 launch ackermann_robot drive.launch.py
-```
+All dimensions below came from the previous robot description. Values marked
+as estimates should be measured again before they are used in a new model.
 
-Wrong USB port:
+| Measurement | Value |
+|---|---:|
+| Body length | 0.385 m |
+| Body width | 0.300 m |
+| Body height | 0.165 m |
+| Ground clearance | 0.030 m (estimate) |
+| Wheelbase | 0.2775 m |
+| Wheel diameter | 0.120 m |
+| Wheel width | 0.057 m |
+| Track width, wheel center to wheel center | 0.247 m |
+| Inner gap between wheels | 0.190 m |
+| Approximate overall wheel width | 0.304 m |
 
-```bash
-ros2 launch ackermann_robot drive.launch.py serial_port:=/dev/ttyUSB1
-```
+Reference frame used previously: the rear axle center projected onto the
+ground, with positive X forward, positive Y left, and positive Z upward.
 
-**On a laptop** (same `ROS_DOMAIN_ID` / network):
+| Sensor center | X | Y | Z | Yaw |
+|---|---:|---:|---:|---:|
+| RPLIDAR C1 | 0.237 m | 0 m | 0.165 m | 180 degrees |
+| RealSense D435i prism | 0.2975 m | 0 m | 0.1275 m | 0 degrees |
 
-```bash
-source /opt/ros/jazzy/setup.bash
-rviz2 -d $(ros2 pkg prefix ackermann_robot)/share/ackermann_robot/rviz/nav2.rviz
-```
-
-In RViz use **“Nav2 Goal”** (not plain “2D Goal Pose”). Drive the robot a few metres first so SLAM has a map, then click a goal.
-
-### What `drive.launch.py` starts
-
-| Component | Role |
-|-----------|------|
-| `robot_state_publisher` | `base_link`, `base_laser`, sensor TF |
-| `c1` | `/scan` |
-| `rf2o` + **IMU** + **EKF** | `/odom_rf2o` fused → `/odom` + TF (`use_ekf:=false` = raw rf2o) |
-| **slam_toolbox** | `/map`, `map`→`odom` (live mapping) |
-| Nav2 | plan + follow path → `/cmd_vel_nav` |
-| `cmd_vel_to_effort` | Nav2 → `/ackermann/cmd_effort` (`cmd_vel_to_effort.yaml` deadband + `closed_loop`) |
-| `ackermann_driver` | PWM servo + motor |
-
-### Save the map
-
-```bash
-ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data: 'my_map'}}"
-```
-
-### Dependencies
-
-```bash
-sudo apt install ros-jazzy-slam-toolbox ros-jazzy-nav2-bringup
-```
-
-(`nav2_* packages are pulled in via `package.xml` / apt as needed.)
-
-### Checks
-
-```bash
-ros2 topic hz /scan
-ros2 topic hz /map
-ros2 lifecycle get /bt_navigator
-ros2 run tf2_ros tf2_monitor
-```
-
----
-
-## Other launches
-
-| Launch | Use |
-|--------|-----|
-| `bringup.launch.py` | Lidar + odom + driver only (no SLAM/Nav2) — bench tests |
-| `odom_fusion_experiment.launch.py` | RF2O + IMU EKF experiment |
-| `slam.launch.py` | SLAM only (included in `drive.launch.py`) |
-| `navigation.launch.py` | Same as `drive.launch.py` (lower-level name) |
-
----
-
-## Tuning
-
-- **Motor deadband / cmd_vel scaling:** `config/cmd_vel_to_effort.yaml`
-- **PWM ticks:** `config/ackermann_driver.yaml`
-- **Nav2 speeds / turn radius:** `config/nav2_params.yaml`
-
----
-
-## RF2O (C1 compatibility)
-
-See package notes in `rf2o_laser_odometry/LD19_COMPAT.md` — circular scan `angle_min=0`, `angle_max≈2π` handling and empty `init_pose_from_topic` default.
+The old Nav2 configuration used a 0.43 x 0.28 m planning footprint and a
+1.3 m minimum turning radius. These were planning/tuning values, not direct
+physical measurements.
