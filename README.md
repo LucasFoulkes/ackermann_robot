@@ -3,8 +3,11 @@
 Clean ROS 2 package retained in the original Git repository so the previous
 implementation remains available in history.
 
-The package intentionally contains no nodes, launch files, configuration, or
-robot description yet.
+The package now contains a measured robot description, lidar/MOLA bringup,
+isolated drivetrain experiments, and an experimental adaptive Nav2 controller.
+The integrated actuator results, safety limits, architecture, and operating
+procedure are in
+[`docs/throttle-steering-adaptive-control.md`](docs/throttle-steering-adaptive-control.md).
 
 ## Known robot measurements
 

@@ -1,0 +1,33 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="4" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithCommittedPath">
+        <!-- Compute exactly once per new goal. Replanning an invalid path every
+             second reset cusp chronology and produced 24 incompatible plans
+             during the 11:33 regression. FollowPath is now a proxy that owns
+             the committed path and dispatches one direction segment at a time. -->
+        <GoalUpdatedController>
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+            <ClearEntireCostmap name="ClearGlobal" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </GoalUpdatedController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+          <ClearEntireCostmap name="ClearLocal" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="AckermannRecovery">
+        <GoalUpdated/>
+        <RoundRobin>
+          <Sequence>
+            <ClearEntireCostmap name="ClearLocalRecovery" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalRecovery" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <BackUp backup_dist="0.25" backup_speed="0.10" error_code_id="{backup_code_id}"/>
+          <Wait wait_duration="3.0"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>
