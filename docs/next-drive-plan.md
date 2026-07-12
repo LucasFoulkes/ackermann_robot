@@ -50,13 +50,18 @@ persists in `~/.robot/planner_trackability.yaml`; per-segment evidence is also
 recorded on `/planner_trackability` in the bag.
 
 The path is committed only while it remains executable. The dispatcher now
-measures chronological distance along the active one-direction polyline. If it
-makes no new 0.05 m progress for 6.0 s, or RPP requests the opposite direction
-for 0.75 s inside that segment, the dispatcher cancels it with
-`FAILED_TO_MAKE_PROGRESS`. The BT does not retry those old segments: it clears
-both costmaps and computes one fresh path from the live pose. This is
-event-triggered replanning, not periodic replanning. A moving obstacle gets a
-2.0 s wait before BackUp is considered.
+measures chronological distance along the active one-direction polyline and
+asks Nav2's footprint-aware `IsPathValid` service about the next 1.50 m every
+0.50 s. If that remaining path stays invalid for 0.75 s, makes no new 0.05 m
+progress for 6.0 s, or RPP requests the opposite direction for 0.75 s inside
+the segment, the dispatcher cancels it with `FAILED_TO_MAKE_PROGRESS`. The BT
+does not retry those old segments: it clears both costmaps and computes one
+fresh path from the live pose. This is event-triggered replanning, not periodic
+replanning. A moving obstacle gets a 2.0 s wait before BackUp is considered.
+
+New frontend goals are serialized. A replacement goal first cancels the old
+backend FollowPath goal and waits for its execution to end, preventing two RPP
+goals from briefly owning the actuator at once.
 
 The first rollback-validation run was materially successful: 14 goals
 succeeded, no controller/progress failures occurred, and 42 chronological
@@ -70,6 +75,13 @@ Collision Monitor. After the monitor, the actuator node may only stop for a
 watchdog, stale sensor, or closer local obstacle; it does not raise speed or
 change curvature. Steering identification probe taps are disabled for this
 rollback verification.
+
+Low-speed requests (<=0.14 m/s) and the final 0.45 m of a committed segment are
+now treated as gentle motion rather than ordinary continuous-speed control.
+The actuator pre-steers, applies at most a 0.45 s pulse bounded to the learned
+directional breakaway plus 6 us, returns to neutral, coasts for at least 0.35 s,
+and only then re-arms. This preserves Nav2's request to move gently without
+holding an ESC launch kick long enough to create the historical tiny lunge.
 
 ## Drive procedure
 
@@ -124,6 +136,15 @@ in write mode; older sessions remain separate and are never appended.
 | stale FollowPath retries after segment failure | 0 |
 | opposite-direction command inside a segment | abort/replan within 0.75 s |
 | no chronological segment progress | abort/replan within 6.0 s |
+| newly blocked remaining path | abort/replan after 0.75 s persistent invalidity |
+| gentle launch pulse | <=0.55 s observed, then neutral/coast |
 
 Do not expect the radius to jump during a drive: evidence is persisted as it is
 collected, and the weakest learned branch is applied at the next safe launch.
+
+Keep the next run at 0.30 m/s. A one-third increase would be 0.40 m/s, above
+the current configured 0.35 m/s forward and 0.30 m/s reverse limits. With the
+roughly 10 Hz lidar/odometry pipeline it also increases distance traveled per
+observation and braking distance precisely where obstacle reaction was already
+late. After this build passes a representative drive, test 0.35 m/s forward as
+a separate Git-checkpointed experiment; keep reverse at 0.30 m/s initially.

@@ -10,7 +10,8 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 from ackermann_robot.adaptive_model import (
-    conservative_curvature_limit, learned_planner_curvature)
+    conservative_curvature_limit, learned_planner_curvature,
+    TrackabilityEstimator)
 
 
 def learned_navigation_envelope(control_path):
@@ -43,8 +44,12 @@ def learned_navigation_envelope(control_path):
     planning_curvature = learned_planner_curvature(
         curvature, utilization,
         prior_radius, trackability)
+    estimator = TrackabilityEstimator(
+        min(curvature * utilization, 1.0 / prior_radius),
+        curvature * utilization, state=trackability)
     return (curvature, 1.0 / curvature, 1.0 / planning_curvature,
-            trackability_path, utilization, prior_radius)
+            trackability_path, utilization, prior_radius,
+            estimator.source, estimator.confidence)
 
 
 def generate_launch_description():
@@ -54,7 +59,8 @@ def generate_launch_description():
     tree = os.path.join(share, 'config', 'navigate_to_pose_ackermann.xml')
     arm = LaunchConfiguration('arm_hardware')
     (curvature_limit, controller_radius, planner_radius,
-     trackability_path, utilization, prior_radius) = (
+     trackability_path, utilization, prior_radius,
+     planner_source, planner_confidence) = (
         learned_navigation_envelope(control))
     actuator_envelope = {'maximum_curvature_1pm': curvature_limit}
     planner_envelope = {
@@ -78,6 +84,9 @@ def generate_launch_description():
                  'segment_progress_epsilon_m': 0.05,
                  'segment_wrong_direction_timeout_s': 0.75,
                  'segment_watch_min_length_m': 0.30,
+                 'segment_path_check_period_s': 0.50,
+                 'segment_path_check_horizon_m': 1.50,
+                 'segment_blocked_path_timeout_s': 0.75,
                  'trackability_state_path': trackability_path,
                  'trackability_prior_radius_m': prior_radius,
                  'trackability_physical_limit_1pm': (
@@ -109,5 +118,6 @@ def generate_launch_description():
             'Learned Ackermann envelope: '
             f'physical curvature={curvature_limit:.3f} 1/m, '
             f'physical radius={controller_radius:.3f} m, '
-            f'planned radius={planner_radius:.3f} m')),
+            f'planned radius={planner_radius:.3f} m '
+            f'({planner_source}, confidence={planner_confidence:.2f})')),
         *nodes, lifecycle])

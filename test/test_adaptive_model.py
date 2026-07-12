@@ -4,7 +4,8 @@ from ackermann_robot.adaptive_model import (
     DelayEstimator, PathGeometry, TrackabilityEstimator,
     compose_preview_curvature,
     conservative_curvature_limit,
-    learned_planner_curvature, limit_ackermann_twist,
+    gentle_motion_requested, learned_planner_curvature,
+    limit_ackermann_twist, limit_gentle_launch_pulse,
     path_curvature_floor, path_direction_runs, polyline_projection,
     scan_point_clearance, segment_abort_reason, segment_goal_checker,
     stopping_clearance,
@@ -99,6 +100,16 @@ def test_segment_abort_detects_wrong_direction_and_no_progress():
         'no chronological progress on committed segment')
     assert segment_abort_reason(10., .2, 0., None) == ''
     assert segment_abort_reason(10., 1., 9., None) == ''
+    assert segment_abort_reason(10., 1., 9., None, 9.0) == (
+        'remaining committed path became invalid')
+
+
+def test_gentle_motion_preserves_slow_and_short_segment_intent():
+    assert gentle_motion_requested(.12, 2.0)
+    assert gentle_motion_requested(.30, .30)
+    assert not gentle_motion_requested(.30, 2.0)
+    assert limit_gentle_launch_pulse(1400., 1422., True) == 1416.
+    assert limit_gentle_launch_pulse(1620., 1589., False) == 1595.
 
 
 def test_trackability_contracts_faster_than_it_promotes():
@@ -132,6 +143,16 @@ def test_trackability_ignores_contaminated_evidence_and_round_trips():
     first.observe('reverse_positive', .65, True)
     second = TrackabilityEstimator(1.0 / 1.3, .92, state=first.state())
     assert second.state()['branches'] == first.state()['branches']
+
+
+def test_trackability_labels_prior_until_every_branch_has_evidence():
+    estimator = TrackabilityEstimator(1.0 / 1.3, .92)
+    assert estimator.source == 'bootstrap_prior'
+    for branch in estimator.branches:
+        for _ in range(3):
+            estimator.observe(branch, .70, True)
+    assert estimator.source == 'learned'
+    assert math.isclose(estimator.confidence, 1.0)
 
 
 def test_learned_planner_curvature_uses_prior_then_worst_branch():

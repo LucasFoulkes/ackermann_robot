@@ -13,6 +13,7 @@ import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Twist
 from nav2_msgs.action import FollowPath
+from nav2_msgs.srv import IsPathValid
 from nav_msgs.msg import Odometry, Path
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -110,6 +111,9 @@ class PathSegmentDispatcher(Node):
         self.declare_parameter('segment_progress_epsilon_m', 0.05)
         self.declare_parameter('segment_wrong_direction_timeout_s', 0.75)
         self.declare_parameter('segment_watch_min_length_m', 0.30)
+        self.declare_parameter('segment_path_check_period_s', 0.50)
+        self.declare_parameter('segment_path_check_horizon_m', 1.50)
+        self.declare_parameter('segment_blocked_path_timeout_s', 0.75)
         frontend = self.get_parameter('frontend_action_name').value
         backend = self.get_parameter('backend_action_name').value
         self.settle_time = float(self.get_parameter('cusp_settle_time_s').value)
@@ -141,6 +145,12 @@ class PathSegmentDispatcher(Node):
             self.get_parameter('segment_wrong_direction_timeout_s').value)
         self.watch_min_length = float(
             self.get_parameter('segment_watch_min_length_m').value)
+        self.path_check_period = float(
+            self.get_parameter('segment_path_check_period_s').value)
+        self.path_check_horizon = float(
+            self.get_parameter('segment_path_check_horizon_m').value)
+        self.blocked_path_timeout = float(
+            self.get_parameter('segment_blocked_path_timeout_s').value)
         prior = 1.0 / float(
             self.get_parameter('trackability_prior_radius_m').value)
         physical = float(
@@ -153,9 +163,18 @@ class PathSegmentDispatcher(Node):
         self.pre_monitor_command = (0.0, 0.0)
         self.post_monitor_command = (0.0, 0.0)
         self.active_metric = None
+        self.execution_lock = threading.Lock()
+        self.generation_lock = threading.Lock()
+        self.latest_generation = 0
+        self.request_generations = {}
+        self.active_execution = False
+        self.backend_goals = {}
+        self.cancel_futures = set()
         self.group = ReentrantCallbackGroup()
         self.client = ActionClient(
             self, FollowPath, backend, callback_group=self.group)
+        self.path_valid_client = self.create_client(
+            IsPathValid, '/is_path_valid', callback_group=self.group)
         self.server = ActionServer(
             self, FollowPath, frontend,
             execute_callback=self.execute,
@@ -180,11 +199,14 @@ class PathSegmentDispatcher(Node):
             callback_group=self.group)
         self.create_timer(
             0.10, self._watch_segment, callback_group=self.group)
-        self.backend_goals = {}
-        self.cancel_futures = set()
+        self.create_timer(
+            self.path_check_period, self._check_remaining_path,
+            callback_group=self.group)
         self.get_logger().info(
-            f'Cusp dispatcher ready: {frontend} -> {backend}; learned '
-            f'planner radius {1.0 / self.trackability.curvature_limit:.3f} m')
+            f'Cusp dispatcher ready: {frontend} -> {backend}; '
+            f'planner radius {1.0 / self.trackability.curvature_limit:.3f} m '
+            f'({self.trackability.source}, '
+            f'confidence={self.trackability.confidence:.2f})')
 
     def _load_trackability_state(self):
         try:
@@ -260,6 +282,7 @@ class PathSegmentDispatcher(Node):
                 return
             xte, heading, along = polyline_projection(
                 metric['samples'], *current)
+            metric['current_progress_m'] = along
             if along >= metric['best_progress_m'] + self.progress_epsilon:
                 metric['best_progress_m'] = along
                 metric['last_progress_at'] = time.monotonic()
@@ -296,10 +319,72 @@ class PathSegmentDispatcher(Node):
                 'commanded_samples': 0, 'blocked_samples': 0,
                 'contaminated': False,
                 'best_progress_m': initial_progress,
+                'current_progress_m': initial_progress,
                 'last_progress_at': time.monotonic(),
                 'wrong_direction_since': None,
+                'blocked_path_since': None,
+                'path_check_pending': False,
                 'abort_reason': '', 'cancel_requested': False,
-                'backend_goal': backend_goal}
+                'backend_goal': backend_goal,
+                'segment_path': segment}
+
+    def _check_remaining_path(self):
+        if not self.path_valid_client.service_is_ready():
+            return
+        with self.metric_lock:
+            metric = self.active_metric
+            if (metric is None or metric['cancel_requested'] or
+                    metric['path_check_pending'] or
+                    metric['length'] < self.watch_min_length):
+                return
+            progress = metric['current_progress_m']
+            samples = metric['samples']
+            source = metric['segment_path']
+            token = id(metric)
+            metric['path_check_pending'] = True
+        cumulative = [0.0]
+        for first, second in zip(samples, samples[1:]):
+            cumulative.append(cumulative[-1] + math.hypot(
+                second[0] - first[0], second[1] - first[1]))
+        start = max(0.0, progress - 0.10)
+        end = progress + self.path_check_horizon
+        indices = [index for index, distance in enumerate(cumulative)
+                   if start <= distance <= end]
+        if indices and indices[0] > 0:
+            indices.insert(0, indices[0] - 1)
+        if len(indices) < 2:
+            with self.metric_lock:
+                if self.active_metric is not None and id(
+                        self.active_metric) == token:
+                    self.active_metric['path_check_pending'] = False
+            return
+        path = Path()
+        path.header = source.header
+        path.poses = [source.poses[index] for index in indices]
+        request = IsPathValid.Request()
+        request.path = path
+        future = self.path_valid_client.call_async(request)
+        future.add_done_callback(
+            lambda completed, identity=token:
+            self._path_check_complete(completed, identity))
+
+    def _path_check_complete(self, future, token):
+        try:
+            invalid = not bool(future.result().is_valid)
+        except Exception as error:
+            self.get_logger().warning(f'Path validity check failed: {error}')
+            invalid = False
+        now = time.monotonic()
+        with self.metric_lock:
+            metric = self.active_metric
+            if metric is None or id(metric) != token:
+                return
+            metric['path_check_pending'] = False
+            if invalid:
+                if metric['blocked_path_since'] is None:
+                    metric['blocked_path_since'] = now
+            else:
+                metric['blocked_path_since'] = None
 
     def _watch_segment(self):
         backend_goal = None
@@ -312,8 +397,10 @@ class PathSegmentDispatcher(Node):
             reason = segment_abort_reason(
                 now, metric['length'], metric['last_progress_at'],
                 metric['wrong_direction_since'],
+                metric['blocked_path_since'],
                 no_progress_timeout=self.no_progress_timeout,
                 wrong_direction_timeout=self.wrong_direction_timeout,
+                blocked_path_timeout=self.blocked_path_timeout,
                 minimum_watched_length=self.watch_min_length)
             if reason:
                 metric['abort_reason'] = reason
@@ -407,8 +494,22 @@ class PathSegmentDispatcher(Node):
         return metric['abort_reason']
 
     def goal(self, request):
-        return (GoalResponse.ACCEPT if len(request.path.poses) >= 2
-                else GoalResponse.REJECT)
+        if len(request.path.poses) < 2:
+            return GoalResponse.REJECT
+        with self.generation_lock:
+            self.latest_generation += 1
+            self.request_generations[id(request)] = self.latest_generation
+            superseding = self.active_execution
+            backend_goals = list(self.backend_goals.values())
+        if superseding:
+            self.get_logger().warning(
+                'New FollowPath goal supersedes active dispatch; '
+                'canceling old backend before starting it')
+            for backend_goal in backend_goals:
+                future = backend_goal.cancel_goal_async()
+                self.cancel_futures.add(future)
+                future.add_done_callback(self._cancel_complete)
+        return GoalResponse.ACCEPT
 
     def cancel(self, goal_handle):
         backend_goal = self.backend_goals.get(bytes(goal_handle.goal_id.uuid))
@@ -416,7 +517,30 @@ class PathSegmentDispatcher(Node):
             backend_goal.cancel_goal_async()
         return CancelResponse.ACCEPT
 
+    def _is_superseded(self, generation):
+        with self.generation_lock:
+            return generation < self.latest_generation
+
     async def execute(self, goal_handle):
+        generation = self.request_generations.pop(
+            id(goal_handle.request), self.latest_generation)
+        self.execution_lock.acquire()
+        with self.generation_lock:
+            self.active_execution = True
+        try:
+            if self._is_superseded(generation):
+                result = FollowPath.Result()
+                result.error_code = FollowPath.Result.UNKNOWN
+                result.error_msg = 'superseded before dispatch began'
+                goal_handle.abort()
+                return result
+            return await self._execute_serial(goal_handle, generation)
+        finally:
+            with self.generation_lock:
+                self.active_execution = False
+            self.execution_lock.release()
+
+    async def _execute_serial(self, goal_handle, generation):
         result = FollowPath.Result()
         raw_segments = split_path_at_cusps(goal_handle.request.path)
         segments = []
@@ -443,8 +567,12 @@ class PathSegmentDispatcher(Node):
             f'Executing {len(segments)} chronological direction segment(s)')
         try:
             for index, (segment, direction) in enumerate(segments):
-                if goal_handle.is_cancel_requested:
-                    goal_handle.canceled()
+                if (goal_handle.is_cancel_requested or
+                        self._is_superseded(generation)):
+                    if goal_handle.is_cancel_requested:
+                        goal_handle.canceled()
+                    else:
+                        goal_handle.abort()
                     return result
                 request = FollowPath.Goal()
                 request.path = segment
@@ -476,8 +604,12 @@ class PathSegmentDispatcher(Node):
                 succeeded = wrapped.status == GoalStatus.STATUS_SUCCEEDED
                 abort_reason = self._finish_metric(succeeded)
                 self.backend_goals.pop(key, None)
-                if goal_handle.is_cancel_requested:
-                    goal_handle.canceled()
+                if (goal_handle.is_cancel_requested or
+                        self._is_superseded(generation)):
+                    if goal_handle.is_cancel_requested:
+                        goal_handle.canceled()
+                    else:
+                        goal_handle.abort()
                     return result
                 if abort_reason:
                     result.error_code = FollowPath.Result.FAILED_TO_MAKE_PROGRESS
@@ -496,8 +628,12 @@ class PathSegmentDispatcher(Node):
                     deadline = (self.get_clock().now().nanoseconds * 1e-9 +
                                 self.settle_time)
                     while self.get_clock().now().nanoseconds * 1e-9 < deadline:
-                        if goal_handle.is_cancel_requested:
-                            goal_handle.canceled()
+                        if (goal_handle.is_cancel_requested or
+                                self._is_superseded(generation)):
+                            if goal_handle.is_cancel_requested:
+                                goal_handle.canceled()
+                            else:
+                                goal_handle.abort()
                             return result
                         # rclpy coroutine execution does not install an asyncio
                         # event loop. The multithreaded executor keeps action

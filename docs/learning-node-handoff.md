@@ -472,3 +472,46 @@ after 0.75 s of an opposite-direction request. A moving obstacle is allowed a
 loop 9.4 s after segment start instead of allowing 111 s. A dense disarmed
 FollowPath integration test confirmed backend cancellation and frontend error
 105 (`FAILED_TO_MAKE_PROGRESS`) complete cleanly.
+
+### 10.6 July 12 13:08 run and next correction
+
+Run `adaptive_drive_20260712_130802` is tagged
+`experiment-20260712-130802` at commit `975c4e4`. It was materially better:
+14 frontend goals began, 11 succeeded, three were preempted, and none ended in
+a controller failure. Thirty direction segments were scored. Two
+wrong-direction and two no-progress aborts caused fresh planning in about
+0.24--0.56 s instead of replaying stale geometry. Curvature saturation fell to
+20.7% from 35.4% in the preceding run. Steering RLS stayed healthy
+(gain 0.972--1.007, delay about 0.30 s), so the remaining defects were command
+semantics and replanning latency, not a broken steering plant.
+
+The planner radius reported as 1.30 m was not yet learned. It was the bootstrap
+prior mixed with incomplete evidence: forward-negative had no eligible
+segments; the other three branches had three each, with reverse-positive only
+passing one. The state now explicitly publishes `bootstrap_prior`,
+`mixed_prior_and_evidence`, or `learned` plus confidence. It may claim learned
+only after every direction/turn branch has at least three eligible observations.
+The evidence history is retained in `~/.robot/planner_trackability.yaml`.
+
+Two additional causes were visible:
+
+- a committed path was reconsidered mainly after RPP/Collision Monitor was
+  already close to an obstacle; the dispatcher now checks the next 1.50 m via
+  Nav2's footprint-aware `IsPathValid` service every 0.50 s and replans after
+  0.75 s of persistent invalidity;
+- six of 30 launches exceeded 0.35 m/s despite a 0.30 m/s request, and seven
+  command episodes traveled under 0.10 m. Slow and short moves now use
+  pre-steer plus bounded learned-breakaway pulse-and-coast, never an escalating
+  held launch kick.
+
+Goal replacement is serialized: the outgoing backend action must cancel before
+the next frontend goal dispatches. Disarmed integration verified both this
+ordering and a stationary 0.35 m short-path command. The latter produced six
+0.48--0.50 s launch pulses, returned to neutral between every pulse, stayed
+within the learned breakaway plus 6 us cap, and exited through the six-second
+chronological no-progress guard. The smoke CSV was verified before deletion.
+
+Do not raise speed for the next physical run. One-third faster is 0.40 m/s,
+which exceeds the current 0.35 m/s forward and 0.30 m/s reverse envelope and
+would worsen the observed late-obstacle margin. If this build passes, stage a
+separate 0.35 m/s-forward experiment while retaining 0.30 m/s reverse.

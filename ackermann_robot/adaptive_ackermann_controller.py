@@ -13,7 +13,9 @@ import rclpy
 import yaml
 from ackermann_robot.adaptive_model import (
     DelayEstimator, PathGeometry, compose_preview_curvature,
-    limit_ackermann_twist, scan_point_clearance, stopping_clearance)
+    gentle_motion_requested, limit_ackermann_twist,
+    limit_gentle_launch_pulse, polyline_projection, scan_point_clearance,
+    stopping_clearance)
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
@@ -139,6 +141,16 @@ class AdaptiveAckermannController(Node):
             'effort_scale_process_per_s': 0.0005,
             'effort_scale_boot_sd': 0.10,
             'startup_drop_through_mps': 0.15,
+            # The ESC cannot roll continuously at arbitrarily low speed. For
+            # gentle requests and short committed segments, pre-steer, apply a
+            # bounded learned breakaway pulse, then coast before re-arming.
+            'gentle_request_max_mps': .14,
+            'gentle_segment_length_m': .45,
+            'gentle_steering_ready_us': 60.0,
+            'gentle_min_coast_s': .35,
+            'gentle_max_pulse_s': .45,
+            'gentle_rearm_speed_mps': .025,
+            'gentle_launch_max_extra_us': 6.0,
             # Suppress the recovery kick when stalling this close to a path
             # cusp: the stop is intended, and the kick was pure lurch. If the
             # command persists past the wait, recovery proceeds as fallback.
@@ -270,7 +282,9 @@ class AdaptiveAckermannController(Node):
             'startup_causal_pulse_us', 'floor_estimate_forward_mps',
             'floor_estimate_reverse_mps', 'floor_observer_json',
             'probe_id', 'probe_offset_us',
-            'effort_scale', 'effort_scale_sd'])
+            'effort_scale', 'effort_scale_sd',
+            'segment_remaining_m', 'gentle_motion',
+            'gentle_coast_active', 'gentle_pulse_active'])
         self.drive_writer.writeheader()
         self.trim = {'throttle_forward': 0., 'throttle_reverse': 0.}
         self.curvature_error_ema = 0.0
@@ -343,6 +357,15 @@ class AdaptiveAckermannController(Node):
         self.startup_causal_pulse_us = math.nan
         self.startup_kick_pulse_us = math.nan
         self.planned_stop_since = 0.0
+        self.control_segment_samples = None
+        self.control_segment_length = 0.0
+        self.control_segment_time = None
+        self.segment_remaining_m = math.inf
+        self.gentle_motion = False
+        self.gentle_coast_active = False
+        self.gentle_coast_since = 0.0
+        self.gentle_pulse_active = False
+        self.gentle_pulse_since = 0.0
         self.session_launches = {'forward': 0, 'reverse': 0}
         self.last_cmd_sign = 0
         self.cmd_sign_since = 0.0
@@ -379,6 +402,10 @@ class AdaptiveAckermannController(Node):
             Twist, '/cmd_vel_nav_raw', self._planner_cmd, 10)
         if self.p['enable_external_path_interpretation']:
             self.create_subscription(Path, '/plan', self._path, 10)
+        # Unlike the planner's mutable full /plan, this is the exact
+        # one-direction path currently owned by the dispatcher.
+        self.create_subscription(
+            Path, '/controller_segment_plan', self._control_segment, 10)
         self.create_subscription(TFMessage, '/tf', self._tf, 50)
         self.create_subscription(LaserScan, '/scan', self._scan, 10)
         self.odom_pub = self.create_publisher(Odometry, '/odom', 20)
@@ -601,6 +628,29 @@ class AdaptiveAckermannController(Node):
             self.path_geometry = None
             self.path_time = None
             self._reset_path_commitment()
+
+    def _control_segment(self, msg):
+        if msg.header.frame_id.lstrip('/') != 'odom' or len(msg.poses) < 2:
+            self.control_segment_samples = None
+            self.control_segment_length = 0.0
+            self.control_segment_time = None
+            return
+        samples = [
+            (pose.pose.position.x, pose.pose.position.y,
+             yaw_from_quaternion(pose.pose.orientation))
+            for pose in msg.poses]
+        self.control_segment_samples = samples
+        self.control_segment_length = sum(
+            math.hypot(second[0] - first[0], second[1] - first[1])
+            for first, second in zip(samples, samples[1:]))
+        self.control_segment_time = time.monotonic()
+
+    def _segment_remaining(self):
+        if self.control_segment_samples is None or self.pose is None:
+            return math.inf
+        _, _, along = polyline_projection(
+            self.control_segment_samples, *self.pose)
+        return max(0.0, self.control_segment_length - along)
 
     def _scan(self, msg):
         valid = []; forward = []; reverse = []
@@ -945,6 +995,9 @@ class AdaptiveAckermannController(Node):
         if stop_reason or abs(self.speed) > self.p['maximum_measured_speed_mps']:
             self.fault = stop_reason or 'measured overspeed'; self.state = 'stopped'
             self.direction = None; self.low_samples = self.limit_dwell = 0
+            self.gentle_motion = False
+            self.gentle_coast_active = False
+            self.gentle_pulse_active = False
             target_throttle = self.p['throttle_neutral_us']
             target_steering = self.p['steering_center_us']; self.learn_start = None
             self.preview = self._empty_preview()
@@ -963,6 +1016,8 @@ class AdaptiveAckermannController(Node):
                 self.startup_effort_attempts = 0
                 self.startup_causal_pulse_us = math.nan
                 self.startup_kick_pulse_us = math.nan
+                self.gentle_coast_active = False
+                self.gentle_pulse_active = False
                 self.recent_rolling_speeds.clear()
                 self.floor_streak = 0
                 self.floor_streak_min = math.inf
@@ -979,6 +1034,20 @@ class AdaptiveAckermannController(Node):
             steering_transition = (
                 steering_error_us > self.p['steering_slowdown_error_us'])
             directional_speed = sign * self.speed
+            self.segment_remaining_m = self._segment_remaining()
+            self.gentle_motion = gentle_motion_requested(
+                self.planner_cmd.linear.x, self.segment_remaining_m,
+                self.p['gentle_request_max_mps'],
+                self.p['gentle_segment_length_m'])
+            if not self.gentle_motion:
+                self.gentle_coast_active = False
+                self.gentle_pulse_active = False
+            elif self.state == 'rolling':
+                # A newly gentle request must shed rolling energy before any
+                # additional launch effort is allowed.
+                self.state = 'startup'
+                self.gentle_coast_active = True
+                self.gentle_coast_since = now
             # Stage-2 probe scheduler: alternate-sign steering taps during
             # boring cruising, gated so they never coincide with anything
             # that matters. Measure-only; estimators consume them in stage 3.
@@ -1044,16 +1113,46 @@ class AdaptiveAckermannController(Node):
                     self.low_samples = self.limit_dwell = 0
             elif self.state in ('startup', 'recovery'):
                 self.throttle_antiwindup_state = f'frozen_{self.state}'
-                if directional_speed >= self.p['breakaway_threshold_mps']:
+                raw_motion = (
+                    not self.odom_outlier and
+                    sign * self.raw_speed >= self.p['motion_threshold_mps'])
+                if (self.gentle_motion and
+                        steering_error_us >
+                        self.p['gentle_steering_ready_us']):
+                    # Steering first: a low-speed correction should not spend
+                    # its launch impulse while the wheels are still traversing.
+                    target_throttle = self.p['throttle_neutral_us']
+                    self.throttle_antiwindup_state = 'gentle_presteer'
+                elif self.gentle_motion and self.gentle_coast_active:
+                    self.gentle_pulse_active = False
+                    target_throttle = self.p['throttle_neutral_us']
+                    self.throttle_antiwindup_state = 'gentle_coast'
+                    if (now - self.gentle_coast_since >=
+                            self.p['gentle_min_coast_s'] and
+                            directional_speed <=
+                            self.p['gentle_rearm_speed_mps']):
+                        self.gentle_coast_active = False
+                        self.startup_last_effort_time = None
+                        self.startup_effort_attempts = 0
+                elif (self.gentle_motion and
+                      (directional_speed >=
+                       self.p['breakaway_threshold_mps'] or raw_motion)):
+                    if not math.isfinite(self.startup_kick_pulse_us):
+                        self.startup_kick_pulse_us = self.throttle_us
+                    if self.state == 'startup':
+                        self._learn_breakaway(now, direction)
+                    self.gentle_coast_active = True
+                    self.gentle_coast_since = now
+                    self.gentle_pulse_active = False
+                    target_throttle = self.p['throttle_neutral_us']
+                    self.throttle_antiwindup_state = 'gentle_motion_detected'
+                elif directional_speed >= self.p['breakaway_threshold_mps']:
                     if self.state == 'startup':
                         self._learn_breakaway(now, direction)
                     self.state = 'rolling'; self.low_samples = self.limit_dwell = 0
                     self.rolling_since = now
                     target_throttle = base + self.trim[trim_key]
                 else:
-                    raw_motion = (
-                        not self.odom_outlier and
-                        sign * self.raw_speed >= self.p['motion_threshold_mps'])
                     # Weaker than sustain during the confirmation window: the
                     # ESC is still unwinding breakaway effort, and dropping
                     # only to the sustain pulse left a 0.5-0.65 m/s tail.
@@ -1116,6 +1215,24 @@ class AdaptiveAckermannController(Node):
                         target_throttle = self.throttle_us + (
                             -self.p['recovery_step_us'] if sign > 0 else
                             self.p['recovery_step_us'])
+                    if self.gentle_motion:
+                        learned = self.breakaway_models[direction]['pulse_us']
+                        target_throttle = limit_gentle_launch_pulse(
+                            target_throttle, learned, sign > 0,
+                            self.p['gentle_launch_max_extra_us'])
+                        if not self.gentle_pulse_active:
+                            self.gentle_pulse_active = True
+                            self.gentle_pulse_since = now
+                        elif (now - self.gentle_pulse_since >=
+                              self.p['gentle_max_pulse_s']):
+                            # Even without a velocity observation, a gentle
+                            # request gets bounded impulse, never a held kick.
+                            self.gentle_pulse_active = False
+                            self.gentle_coast_active = True
+                            self.gentle_coast_since = now
+                            target_throttle = self.p['throttle_neutral_us']
+                            self.throttle_antiwindup_state = (
+                                'gentle_pulse_timeout')
                     limit = self.p['forward_recovery_limit_us'] if sign > 0 else self.p['reverse_recovery_limit_us']
                     target_throttle = max(limit, target_throttle) if sign > 0 else min(limit, target_throttle)
                     at_limit = target_throttle == limit
@@ -1269,6 +1386,10 @@ class AdaptiveAckermannController(Node):
             'probe_offset_us': f'{self.probe_offset_us:.1f}',
             'effort_scale': f'{self.effort_scale:.4f}',
             'effort_scale_sd': f'{math.sqrt(self.effort_scale_var):.4f}',
+            'segment_remaining_m': self.segment_remaining_m,
+            'gentle_motion': int(self.gentle_motion),
+            'gentle_coast_active': int(self.gentle_coast_active),
+            'gentle_pulse_active': int(self.gentle_pulse_active),
             **self.preview,
             **{f'{key}_trim_us': value for key, value in self.trim.items()}})
 
@@ -1399,6 +1520,10 @@ class AdaptiveAckermannController(Node):
                 'floor_estimates_mps': {
                     direction: self._floor_estimate(direction)
                     for direction in ('forward', 'reverse')},
+                'segment_remaining_m': self.segment_remaining_m,
+                'gentle_motion': self.gentle_motion,
+                'gentle_coast_active': self.gentle_coast_active,
+                'gentle_pulse_active': self.gentle_pulse_active,
                 'curvature_error_ema': self.curvature_error_ema}
         self.debug_pub.publish(String(data=json.dumps(data)))
         # Keep the Nav2 limit deterministic while identification is active.

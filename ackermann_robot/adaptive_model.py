@@ -202,9 +202,10 @@ def segment_goal_checker(requested_goal_checker, final_segment,
 
 
 def segment_abort_reason(now, segment_length, last_progress_at,
-                         wrong_direction_since,
+                         wrong_direction_since, blocked_path_since=None,
                          no_progress_timeout=6.0,
                          wrong_direction_timeout=.75,
+                         blocked_path_timeout=.75,
                          minimum_watched_length=.30):
     """Return why a committed direction segment must be replanned."""
     now = float(now)
@@ -212,20 +213,43 @@ def segment_abort_reason(now, segment_length, last_progress_at,
             now - float(wrong_direction_since) >=
             float(wrong_direction_timeout)):
         return 'controller reversed inside a committed segment'
+    if (blocked_path_since is not None and
+            now - float(blocked_path_since) >= float(blocked_path_timeout)):
+        return 'remaining committed path became invalid'
     if (float(segment_length) >= float(minimum_watched_length) and
             now - float(last_progress_at) >= float(no_progress_timeout)):
         return 'no chronological progress on committed segment'
     return ''
 
 
+def gentle_motion_requested(requested_speed, segment_remaining,
+                            maximum_request=.14, maximum_segment=.45):
+    """Preserve low-speed/short-distance intent despite an ESC deadband."""
+    return (abs(float(requested_speed)) <= abs(float(maximum_request)) or
+            float(segment_remaining) <= abs(float(maximum_segment)))
+
+
+def limit_gentle_launch_pulse(target_pulse, learned_breakaway,
+                              forward, maximum_extra_us=6.0):
+    """Bound launch effort beyond learned breakaway for pulse-and-coast."""
+    target = float(target_pulse)
+    learned = float(learned_breakaway)
+    extra = abs(float(maximum_extra_us))
+    return max(learned - extra, target) if forward else min(
+        learned + extra, target)
+
+
 class TrackabilityEstimator:
     """Conservative per-branch learner for dynamically trackable curvature."""
 
     def __init__(self, prior_curvature, physical_limit,
-                 minimum_curvature=0.25, state=None):
+                 minimum_curvature=0.25, state=None,
+                 learned_observations_per_branch=3):
         self.prior = abs(float(prior_curvature))
         self.physical_limit = abs(float(physical_limit))
         self.minimum = min(abs(float(minimum_curvature)), self.prior)
+        self.learned_observations = max(
+            1, int(learned_observations_per_branch))
         saved = (state or {}).get('branches', {})
         self.branches = {}
         for name in TRACKABILITY_BRANCHES:
@@ -249,11 +273,26 @@ class TrackabilityEstimator:
                 'last_demand_1pm': float(
                     branch.get('last_demand_1pm', 0.0)),
                 'last_pass': bool(branch.get('last_pass', False)),
+                'evidence': list(branch.get('evidence', []))[-64:],
             }
 
     @property
     def curvature_limit(self):
         return min(item['estimate_1pm'] for item in self.branches.values())
+
+    @property
+    def confidence(self):
+        return min(min(
+            1.0, item['eligible_observations'] / self.learned_observations)
+            for item in self.branches.values())
+
+    @property
+    def source(self):
+        if self.confidence >= 1.0:
+            return 'learned'
+        if any(item['eligible_observations'] for item in self.branches.values()):
+            return 'mixed_prior_and_evidence'
+        return 'bootstrap_prior'
 
     def observe(self, branch_name, demand_curvature, passed, eligible=True):
         """Update one branch; returns True only when its estimate changes."""
@@ -265,6 +304,9 @@ class TrackabilityEstimator:
         branch['eligible_observations'] += 1
         branch['last_demand_1pm'] = demand
         branch['last_pass'] = bool(passed)
+        branch['evidence'].append({
+            'demand_1pm': demand, 'passed': bool(passed)})
+        branch['evidence'] = branch['evidence'][-64:]
         before = branch['estimate_1pm']
         if passed:
             branch['clean_passes'] += 1
@@ -309,6 +351,9 @@ class TrackabilityEstimator:
             'physical_limit_1pm': self.physical_limit,
             'planner_curvature_1pm': self.curvature_limit,
             'planner_radius_m': 1.0 / self.curvature_limit,
+            'planner_source': self.source,
+            'planner_confidence': self.confidence,
+            'learned_observations_per_branch': self.learned_observations,
             'branches': self.branches,
         }
 

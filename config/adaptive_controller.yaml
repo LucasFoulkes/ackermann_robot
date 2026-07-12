@@ -56,6 +56,16 @@ adaptive_ackermann_controller:
     # confirms motion. Speed units because a fixed 6 us was worth ~2x more
     # speed in reverse (shallow slope) and caused post-launch reverse stalls.
     startup_drop_through_mps: 0.15
+    # Low-speed intent is executed as bounded pulse-and-coast, not converted
+    # into an indefinitely escalating launch. The active dispatcher segment is
+    # authoritative for remaining distance.
+    gentle_request_max_mps: 0.14
+    gentle_segment_length_m: 0.45
+    gentle_steering_ready_us: 60.0
+    gentle_min_coast_s: 0.35
+    gentle_max_pulse_s: 0.45
+    gentle_rearm_speed_mps: 0.025
+    gentle_launch_max_extra_us: 6.0
     # Stalling within this path distance of a cusp is an intended stop:
     # coast (steering pre-positions for the next segment) instead of the
     # recovery kick; fall back to recovery if the command persists.
