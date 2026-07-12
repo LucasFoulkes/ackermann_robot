@@ -5,8 +5,9 @@ from ackermann_robot.adaptive_model import (
     compose_preview_curvature,
     conservative_curvature_limit,
     learned_planner_curvature, limit_ackermann_twist,
-    path_curvature_floor, path_direction_runs,
-    scan_point_clearance, segment_goal_checker, stopping_clearance,
+    path_curvature_floor, path_direction_runs, polyline_projection,
+    scan_point_clearance, segment_abort_reason, segment_goal_checker,
+    stopping_clearance,
     update_cusp_guard)
 
 
@@ -74,12 +75,30 @@ def test_direction_runs_reject_non_executable_input():
     assert path_direction_runs([(0., 0., 0.)]) == []
 
 
+def test_polyline_projection_reports_chronological_progress():
+    samples = [(0., 0., 0.), (1., 0., 0.), (1., 1., math.pi / 2)]
+    distance, heading, along = polyline_projection(
+        samples, 1.1, .4, math.pi / 2)
+    assert math.isclose(distance, .1)
+    assert math.isclose(heading, .3 * math.pi)
+    assert math.isclose(along, 1.4)
+
+
 def test_segment_goal_checker_never_forwards_empty_id_with_multiple_checkers():
     assert segment_goal_checker('', final_segment=True) == 'goal_checker'
     assert segment_goal_checker(
         'custom_final', final_segment=True) == 'custom_final'
     assert segment_goal_checker(
         '', final_segment=False) == 'cusp_goal_checker'
+
+
+def test_segment_abort_detects_wrong_direction_and_no_progress():
+    assert segment_abort_reason(10., 1., 9., 9.0) == (
+        'controller reversed inside a committed segment')
+    assert segment_abort_reason(10., 1., 3., None) == (
+        'no chronological progress on committed segment')
+    assert segment_abort_reason(10., .2, 0., None) == ''
+    assert segment_abort_reason(10., 1., 9., None) == ''
 
 
 def test_trackability_contracts_faster_than_it_promotes():

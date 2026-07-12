@@ -21,7 +21,8 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 from ackermann_robot.adaptive_model import (
-    TrackabilityEstimator, path_direction_runs, segment_goal_checker)
+    TrackabilityEstimator, path_direction_runs, polyline_projection,
+    segment_abort_reason, segment_goal_checker)
 
 
 def yaw_from_quaternion(q):
@@ -67,23 +68,8 @@ def segment_properties(path):
 
 def polyline_tracking_error(samples, x, y, yaw):
     """Return closest (distance, heading error) on a pose polyline."""
-    best = None
-    for first, second in zip(samples, samples[1:]):
-        vx, vy = second[0] - first[0], second[1] - first[1]
-        squared = vx * vx + vy * vy
-        fraction = (0.0 if squared < 1e-9 else max(0.0, min(
-            1.0, ((x - first[0]) * vx + (y - first[1]) * vy) / squared)))
-        px, py = first[0] + fraction * vx, first[1] + fraction * vy
-        delta_yaw = math.atan2(
-            math.sin(second[2] - first[2]),
-            math.cos(second[2] - first[2]))
-        path_yaw = first[2] + fraction * delta_yaw
-        distance = math.hypot(x - px, y - py)
-        heading = abs(math.atan2(
-            math.sin(yaw - path_yaw), math.cos(yaw - path_yaw)))
-        if best is None or distance < best[0]:
-            best = (distance, heading)
-    return best if best is not None else (math.inf, math.inf)
+    distance, heading, _ = polyline_projection(samples, x, y, yaw)
+    return distance, heading
 
 
 def percentile(values, fraction):
@@ -120,6 +106,10 @@ class PathSegmentDispatcher(Node):
         self.declare_parameter('trackability_max_heading_p90_rad', 0.15)
         self.declare_parameter('trackability_max_blocked_fraction', 0.05)
         self.declare_parameter('trackability_min_samples', 10)
+        self.declare_parameter('segment_no_progress_timeout_s', 6.0)
+        self.declare_parameter('segment_progress_epsilon_m', 0.05)
+        self.declare_parameter('segment_wrong_direction_timeout_s', 0.75)
+        self.declare_parameter('segment_watch_min_length_m', 0.30)
         frontend = self.get_parameter('frontend_action_name').value
         backend = self.get_parameter('backend_action_name').value
         self.settle_time = float(self.get_parameter('cusp_settle_time_s').value)
@@ -143,6 +133,14 @@ class PathSegmentDispatcher(Node):
             self.get_parameter('trackability_max_blocked_fraction').value)
         self.minimum_samples = int(
             self.get_parameter('trackability_min_samples').value)
+        self.no_progress_timeout = float(
+            self.get_parameter('segment_no_progress_timeout_s').value)
+        self.progress_epsilon = float(
+            self.get_parameter('segment_progress_epsilon_m').value)
+        self.wrong_direction_timeout = float(
+            self.get_parameter('segment_wrong_direction_timeout_s').value)
+        self.watch_min_length = float(
+            self.get_parameter('segment_watch_min_length_m').value)
         prior = 1.0 / float(
             self.get_parameter('trackability_prior_radius_m').value)
         physical = float(
@@ -180,7 +178,10 @@ class PathSegmentDispatcher(Node):
         self.create_subscription(
             String, '/controller/debug', self._debug, 20,
             callback_group=self.group)
+        self.create_timer(
+            0.10, self._watch_segment, callback_group=self.group)
         self.backend_goals = {}
+        self.cancel_futures = set()
         self.get_logger().info(
             f'Cusp dispatcher ready: {frontend} -> {backend}; learned '
             f'planner radius {1.0 / self.trackability.curvature_limit:.3f} m')
@@ -217,6 +218,17 @@ class PathSegmentDispatcher(Node):
         with self.metric_lock:
             self.pre_monitor_command = (
                 float(message.linear.x), float(message.angular.z))
+            metric = self.active_metric
+            if metric is None:
+                return
+            now = time.monotonic()
+            if abs(message.linear.x) < 0.03:
+                metric['wrong_direction_since'] = None
+            elif float(message.linear.x) * metric['direction'] < 0.0:
+                if metric['wrong_direction_since'] is None:
+                    metric['wrong_direction_since'] = now
+            else:
+                metric['wrong_direction_since'] = None
 
     def _post_monitor(self, message):
         with self.metric_lock:
@@ -244,13 +256,18 @@ class PathSegmentDispatcher(Node):
         with self.metric_lock:
             self.pose = current
             metric = self.active_metric
-            if metric is None or abs(measured_speed) < 0.03:
+            if metric is None:
+                return
+            xte, heading, along = polyline_projection(
+                metric['samples'], *current)
+            if along >= metric['best_progress_m'] + self.progress_epsilon:
+                metric['best_progress_m'] = along
+                metric['last_progress_at'] = time.monotonic()
+            if abs(measured_speed) < 0.03:
                 return
             pre_v = self.pre_monitor_command[0]
             if pre_v * metric['direction'] <= 0.01:
                 return
-            xte, heading = polyline_tracking_error(
-                metric['samples'], *current)
             if math.isfinite(xte) and math.isfinite(heading):
                 metric['xte'].append(xte)
                 metric['heading'].append(heading)
@@ -266,23 +283,76 @@ class PathSegmentDispatcher(Node):
                 abs(math.atan2(math.sin(current[2] - target[2]),
                                math.cos(current[2] - target[2]))))
 
-    def _begin_metric(self, segment, direction):
+    def _begin_metric(self, segment, direction, backend_goal):
         samples, _, length, curvature = segment_properties(segment)
         with self.metric_lock:
             entry_xy, entry_yaw = self._pose_error(self.pose, samples[0])
+            initial_progress = (polyline_projection(
+                samples, *self.pose)[2] if self.pose is not None else 0.0)
             self.active_metric = {
                 'samples': samples, 'direction': direction, 'length': length,
                 'curvature': curvature, 'entry_xy': entry_xy,
                 'entry_yaw': entry_yaw, 'xte': [], 'heading': [],
                 'commanded_samples': 0, 'blocked_samples': 0,
-                'contaminated': False}
+                'contaminated': False,
+                'best_progress_m': initial_progress,
+                'last_progress_at': time.monotonic(),
+                'wrong_direction_since': None,
+                'abort_reason': '', 'cancel_requested': False,
+                'backend_goal': backend_goal}
+
+    def _watch_segment(self):
+        backend_goal = None
+        reason = ''
+        now = time.monotonic()
+        with self.metric_lock:
+            metric = self.active_metric
+            if metric is None or metric['cancel_requested']:
+                return
+            reason = segment_abort_reason(
+                now, metric['length'], metric['last_progress_at'],
+                metric['wrong_direction_since'],
+                no_progress_timeout=self.no_progress_timeout,
+                wrong_direction_timeout=self.wrong_direction_timeout,
+                minimum_watched_length=self.watch_min_length)
+            if reason:
+                metric['abort_reason'] = reason
+                metric['contaminated'] = True
+                metric['cancel_requested'] = True
+                backend_goal = metric.get('backend_goal')
+        if backend_goal is not None:
+            self.get_logger().error(
+                f'Aborting segment for fresh planning: {reason}')
+            future = backend_goal.cancel_goal_async()
+            self.cancel_futures.add(future)
+            future.add_done_callback(self._cancel_complete)
+
+    def _cancel_complete(self, future):
+        self.cancel_futures.discard(future)
+        try:
+            response = future.result()
+            accepted = bool(response.goals_canceling)
+        except Exception as error:
+            accepted = False
+            self.get_logger().error(
+                f'Backend segment cancel request failed: {error}')
+        if accepted:
+            self.get_logger().warning(
+                'Backend accepted segment cancellation for fresh planning')
+            return
+        self.get_logger().error('Backend rejected segment cancellation')
+        # Allow the timer to retry rather than leaving a live backend action
+        # behind an already-detected invalid segment.
+        with self.metric_lock:
+            if self.active_metric is not None:
+                self.active_metric['cancel_requested'] = False
 
     def _finish_metric(self, backend_succeeded):
         with self.metric_lock:
             metric = self.active_metric
             self.active_metric = None
             if metric is None:
-                return
+                return ''
             endpoint_xy, endpoint_yaw = self._pose_error(
                 self.pose, metric['samples'][-1])
         xte_p90 = percentile(metric['xte'], .90)
@@ -320,6 +390,8 @@ class PathSegmentDispatcher(Node):
             'branch_estimate_1pm': (
                 self.trackability.branches[branch]['estimate_1pm']),
             'planner_radius_m': 1.0 / self.trackability.curvature_limit,
+            'best_progress_m': metric['best_progress_m'],
+            'abort_reason': metric['abort_reason'],
         }
         self.trackability_pub.publish(String(data=json.dumps(
             evidence, allow_nan=False)))
@@ -332,6 +404,7 @@ class PathSegmentDispatcher(Node):
             f'eligible={eligible}, pass={passed}, '
             f'estimate={self.trackability.branches[branch]["estimate_1pm"]:.3f} '
             f'1/m{(" UPDATED" if changed else "")}')
+        return metric['abort_reason']
 
     def goal(self, request):
         return (GoalResponse.ACCEPT if len(request.path.poses) >= 2
@@ -394,17 +467,22 @@ class PathSegmentDispatcher(Node):
                     return result
                 self.backend_goals[key] = backend_goal
                 self.segment_pub.publish(segment)
-                self._begin_metric(segment, direction)
+                self._begin_metric(segment, direction, backend_goal)
                 self.get_logger().info(
                     f'Segment {index + 1}/{len(segments)}: '
                     f'{"forward" if direction > 0 else "reverse"}, '
                     f'{len(segment.poses)} poses')
                 wrapped = await backend_goal.get_result_async()
                 succeeded = wrapped.status == GoalStatus.STATUS_SUCCEEDED
-                self._finish_metric(succeeded)
+                abort_reason = self._finish_metric(succeeded)
                 self.backend_goals.pop(key, None)
                 if goal_handle.is_cancel_requested:
                     goal_handle.canceled()
+                    return result
+                if abort_reason:
+                    result.error_code = FollowPath.Result.FAILED_TO_MAKE_PROGRESS
+                    result.error_msg = abort_reason
+                    goal_handle.abort()
                     return result
                 if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
                     result = wrapped.result

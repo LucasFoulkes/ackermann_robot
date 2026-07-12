@@ -49,6 +49,15 @@ radius on the next launch, within 80% of the learned physical envelope. State
 persists in `~/.robot/planner_trackability.yaml`; per-segment evidence is also
 recorded on `/planner_trackability` in the bag.
 
+The path is committed only while it remains executable. The dispatcher now
+measures chronological distance along the active one-direction polyline. If it
+makes no new 0.05 m progress for 6.0 s, or RPP requests the opposite direction
+for 0.75 s inside that segment, the dispatcher cancels it with
+`FAILED_TO_MAKE_PROGRESS`. The BT does not retry those old segments: it clears
+both costmaps and computes one fresh path from the live pose. This is
+event-triggered replanning, not periodic replanning. A moving obstacle gets a
+2.0 s wait before BackUp is considered.
+
 The first rollback-validation run was materially successful: 14 goals
 succeeded, no controller/progress failures occurred, and 42 chronological
 segments executed (21 forward, 21 reverse). Rolling path error was 0.016 m
@@ -112,6 +121,9 @@ in write mode; older sessions remain separate and are never appended.
 | obstacle/watchdog faults during clear-space motion | 0 |
 | eligible trackability evidence | clean-entry segments only |
 | cusp endpoint | <= 0.07 m and <= 0.15 rad before reversal |
+| stale FollowPath retries after segment failure | 0 |
+| opposite-direction command inside a segment | abort/replan within 0.75 s |
+| no chronological segment progress | abort/replan within 6.0 s |
 
 Do not expect the radius to jump during a drive: evidence is persisted as it is
 collected, and the weakest learned branch is applied at the next safe launch.

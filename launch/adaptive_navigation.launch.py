@@ -74,6 +74,10 @@ def generate_launch_description():
                  'cusp_settle_time_s': 0.60,
                  'cusp_goal_checker_id': 'cusp_goal_checker',
                  'minimum_executable_segment_m': 0.18,
+                 'segment_no_progress_timeout_s': 6.0,
+                 'segment_progress_epsilon_m': 0.05,
+                 'segment_wrong_direction_timeout_s': 0.75,
+                 'segment_watch_min_length_m': 0.30,
                  'trackability_state_path': trackability_path,
                  'trackability_prior_radius_m': prior_radius,
                  'trackability_physical_limit_1pm': (

@@ -449,3 +449,26 @@ Operational rule requested by the owner: checkpoint the package in Git before
 every physical experiment and record the short SHA with the run. Never begin an
 armed run from an uncommitted tree; this makes each experimental configuration
 directly reversible and attributable to its CSV/bag.
+
+### 10.5 Event-triggered replanning and rocking-loop guard
+
+Run `adaptive_drive_20260712_124024` is tagged
+`experiment-20260712-124024` at commit `92aa9ac`. It proved ordinary segment
+tracking can be good, but exposed two recovery loops:
+
+- after FollowPath failed, its inner RecoveryNode cleared the local costmap and
+  replayed the original path; one retry began 1.461 m and 1.397 rad from the
+  first segment before the outer recovery eventually generated a fresh path;
+- a later declared forward segment ran for about 111 s while RPP alternated
+  forward and reverse. The robot rocked enough to keep SimpleProgressChecker
+  satisfied without chronological path progress. Goal preemption ended it.
+
+The next build removes the inner stale FollowPath retry. A failure reaches the
+outer recovery, clears both costmaps, and recomputes once from the current pose.
+The dispatcher independently projects odometry onto the active segment and
+aborts for fresh planning after 6 s without 0.05 m new along-track progress, or
+after 0.75 s of an opposite-direction request. A moving obstacle is allowed a
+2 s wait before BackUp. Offline replay would have stopped the observed rocking
+loop 9.4 s after segment start instead of allowing 111 s. A dense disarmed
+FollowPath integration test confirmed backend cancellation and frontend error
+105 (`FAILED_TO_MAKE_PROGRESS`) complete cleanly.

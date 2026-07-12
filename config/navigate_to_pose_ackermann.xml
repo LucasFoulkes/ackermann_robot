@@ -12,10 +12,12 @@
             <ClearEntireCostmap name="ClearGlobal" service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
         </GoalUpdatedController>
-        <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
-          <ClearEntireCostmap name="ClearLocal" service_name="local_costmap/clear_entirely_local_costmap"/>
-        </RecoveryNode>
+        <!-- A failed committed path must leave this pipeline immediately.
+             Retrying FollowPath here replayed the old direction segments from
+             their original start after the robot had moved. The outer recovery
+             clears both costmaps; resetting this pipeline then computes one
+             fresh path from the current pose. -->
+        <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
       </PipelineSequence>
       <ReactiveFallback name="AckermannRecovery">
         <GoalUpdated/>
@@ -24,8 +26,10 @@
             <ClearEntireCostmap name="ClearLocalRecovery" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalRecovery" service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
+          <!-- Give a crossing/moving obstacle time to clear before commanding
+               any recovery motion. Every retry recomputes from the live pose. -->
+          <Wait wait_duration="2.0"/>
           <BackUp backup_dist="0.25" backup_speed="0.10" error_code_id="{backup_code_id}"/>
-          <Wait wait_duration="3.0"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>

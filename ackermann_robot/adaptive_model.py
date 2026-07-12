@@ -156,6 +156,30 @@ def path_direction_runs(samples):
     return runs
 
 
+def polyline_projection(samples, x, y, yaw):
+    """Return closest (distance, heading error, along-track distance)."""
+    best = None
+    travelled = 0.0
+    for first, second in zip(samples, samples[1:]):
+        vx, vy = second[0] - first[0], second[1] - first[1]
+        length = math.hypot(vx, vy)
+        squared = length * length
+        fraction = (0.0 if squared < 1e-9 else clamp(
+            ((float(x) - first[0]) * vx +
+             (float(y) - first[1]) * vy) / squared, 0.0, 1.0))
+        px, py = first[0] + fraction * vx, first[1] + fraction * vy
+        delta_yaw = angle_difference(second[2], first[2])
+        path_yaw = first[2] + fraction * delta_yaw
+        candidate = (
+            math.hypot(float(x) - px, float(y) - py),
+            abs(angle_difference(float(yaw), path_yaw)),
+            travelled + fraction * length)
+        if best is None or candidate[0] < best[0]:
+            best = candidate
+        travelled += length
+    return best if best is not None else (math.inf, math.inf, 0.0)
+
+
 TRACKABILITY_BRANCHES = (
     'forward_negative', 'forward_positive',
     'reverse_negative', 'reverse_positive')
@@ -175,6 +199,23 @@ def segment_goal_checker(requested_goal_checker, final_segment,
         return str(cusp_goal_checker)
     requested = str(requested_goal_checker or '').strip()
     return requested or str(default_goal_checker)
+
+
+def segment_abort_reason(now, segment_length, last_progress_at,
+                         wrong_direction_since,
+                         no_progress_timeout=6.0,
+                         wrong_direction_timeout=.75,
+                         minimum_watched_length=.30):
+    """Return why a committed direction segment must be replanned."""
+    now = float(now)
+    if (wrong_direction_since is not None and
+            now - float(wrong_direction_since) >=
+            float(wrong_direction_timeout)):
+        return 'controller reversed inside a committed segment'
+    if (float(segment_length) >= float(minimum_watched_length) and
+            now - float(last_progress_at) >= float(no_progress_timeout)):
+        return 'no chronological progress on committed segment'
+    return ''
 
 
 class TrackabilityEstimator:
