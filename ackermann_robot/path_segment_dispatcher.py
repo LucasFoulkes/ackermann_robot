@@ -21,7 +21,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 from ackermann_robot.adaptive_model import (
-    TrackabilityEstimator, path_direction_runs)
+    TrackabilityEstimator, path_direction_runs, segment_goal_checker)
 
 
 def yaw_from_quaternion(q):
@@ -376,9 +376,10 @@ class PathSegmentDispatcher(Node):
                 request = FollowPath.Goal()
                 request.path = segment
                 request.controller_id = goal_handle.request.controller_id
-                request.goal_checker_id = (
-                    self.cusp_goal_checker if index + 1 < len(segments)
-                    else goal_handle.request.goal_checker_id)
+                request.goal_checker_id = segment_goal_checker(
+                    goal_handle.request.goal_checker_id,
+                    final_segment=(index + 1 == len(segments)),
+                    cusp_goal_checker=self.cusp_goal_checker)
                 request.progress_checker_id = goal_handle.request.progress_checker_id
 
                 def feedback(message, frontend=goal_handle):

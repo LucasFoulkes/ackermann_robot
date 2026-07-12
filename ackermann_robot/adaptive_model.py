@@ -161,6 +161,22 @@ TRACKABILITY_BRANCHES = (
     'reverse_negative', 'reverse_positive')
 
 
+def segment_goal_checker(requested_goal_checker, final_segment,
+                         cusp_goal_checker='cusp_goal_checker',
+                         default_goal_checker='goal_checker'):
+    """Choose an explicit checker for a proxied FollowPath segment.
+
+    Nav2 permits an empty FollowPath goal_checker_id only when the controller
+    server has a single checker. Once the dispatcher adds its dedicated cusp
+    checker, forwarding the BT's normally empty ID makes every final segment
+    fail before control starts.
+    """
+    if not final_segment:
+        return str(cusp_goal_checker)
+    requested = str(requested_goal_checker or '').strip()
+    return requested or str(default_goal_checker)
+
+
 class TrackabilityEstimator:
     """Conservative per-branch learner for dynamically trackable curvature."""
 

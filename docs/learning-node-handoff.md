@@ -436,3 +436,16 @@ is published on `/planner_trackability` and included in the flight-recorder bag.
 Intermediate cusps use a dedicated 0.07 m / 0.15 rad goal checker. Non-final
 direction fragments below 0.18 m are explicitly skipped rather than silently
 succeeding under the final goal's broad tolerance.
+
+The first build with two goal checkers exposed a Jazzy integration rule: the BT
+normally sends an empty final `goal_checker_id`, but that is rejected when the
+controller server has multiple checkers. Forty FollowPath attempts were rejected
+before control and BT recovery BackUp produced the only movement. Fixed by
+mapping an empty final ID explicitly to `goal_checker`; intermediate segments
+still select `cusp_goal_checker`. Regression coverage verifies empty, explicit,
+and intermediate IDs. Failed-build checkpoint: `62bc8ba`.
+
+Operational rule requested by the owner: checkpoint the package in Git before
+every physical experiment and record the short SHA with the run. Never begin an
+armed run from an uncommitted tree; this makes each experimental configuration
+directly reversible and attributable to its CSV/bag.

@@ -64,8 +64,22 @@ rollback verification.
 
 ## Drive procedure
 
-1. Put the robot in a clear area and stay beside the power switch.
-2. Start:
+1. Before every experiment, checkpoint all code changes in the package Git
+   repository. Record the resulting short SHA with the run notes so a bag/CSV
+   can always be tied to the exact executable source:
+
+   ```bash
+   cd ~/ros2_ws/src/ackermann_robot
+   git status --short
+   git add -A
+   git commit -m "experiment: describe the next run"
+   git rev-parse --short HEAD
+   ```
+
+   If the tree is already clean, record the existing SHA; do not create an
+   empty commit.
+2. Put the robot in a clear area and stay beside the power switch.
+3. Start:
 
    ```bash
    cd ~/ros2_ws
@@ -73,12 +87,12 @@ rollback verification.
    ros2 launch ackermann_robot bringup.launch.py arm_hardware:=true
    ```
 
-3. Issue one simple forward arc goal.
-4. Issue one simple reverse arc goal.
-5. Issue at least one clean turn in each of the four direction/turn branches.
-6. Issue one goal requiring a single forward/reverse cusp.
-7. Only if those behave normally, issue the prior three-point goal.
-8. Stop cleanly with Ctrl-C after the goal finishes or is canceled.
+4. Issue one simple forward arc goal.
+5. Issue one simple reverse arc goal.
+6. Issue at least one clean turn in each of the four direction/turn branches.
+7. Issue one goal requiring a single forward/reverse cusp.
+8. Only if those behave normally, issue the prior three-point goal.
+9. Stop cleanly with Ctrl-C after the goal finishes or is canceled.
 
 Expect a visible neutral dwell at each cusp. Do not expect rapid alternating
 forward/reverse commands. Every controller launch opens a new timestamped CSV

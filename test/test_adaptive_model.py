@@ -6,7 +6,8 @@ from ackermann_robot.adaptive_model import (
     conservative_curvature_limit,
     learned_planner_curvature, limit_ackermann_twist,
     path_curvature_floor, path_direction_runs,
-    scan_point_clearance, stopping_clearance, update_cusp_guard)
+    scan_point_clearance, segment_goal_checker, stopping_clearance,
+    update_cusp_guard)
 
 
 def credible_steering_models(gain=1.0, bias=0.0):
@@ -71,6 +72,14 @@ def test_direction_runs_split_cusps_chronologically_with_shared_indices():
 def test_direction_runs_reject_non_executable_input():
     assert path_direction_runs([]) == []
     assert path_direction_runs([(0., 0., 0.)]) == []
+
+
+def test_segment_goal_checker_never_forwards_empty_id_with_multiple_checkers():
+    assert segment_goal_checker('', final_segment=True) == 'goal_checker'
+    assert segment_goal_checker(
+        'custom_final', final_segment=True) == 'custom_final'
+    assert segment_goal_checker(
+        '', final_segment=False) == 'cusp_goal_checker'
 
 
 def test_trackability_contracts_faster_than_it_promotes():
