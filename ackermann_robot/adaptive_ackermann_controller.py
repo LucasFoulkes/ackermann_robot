@@ -145,7 +145,11 @@ class AdaptiveAckermannController(Node):
             # gentle requests and short committed segments, pre-steer, apply a
             # bounded learned breakaway pulse, then coast before re-arming.
             'gentle_request_max_mps': .10,
-            'gentle_segment_length_m': .15,
+            # Disabled after armed evidence showed a fixed remaining-distance
+            # transition defeated continuous progress near segment endpoints.
+            # Nav2's goal checker owns stopping distance; normal learned
+            # closed-loop throttle remains active until it succeeds.
+            'gentle_segment_length_m': 0.0,
             'gentle_steering_ready_us': 60.0,
             'gentle_min_coast_s': .35,
             'gentle_max_pulse_s': .45,

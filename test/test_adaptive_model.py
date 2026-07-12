@@ -98,15 +98,18 @@ def test_segment_abort_detects_wrong_direction_and_no_progress():
         'controller reversed inside a committed segment')
     assert segment_abort_reason(10., 1., 3., None) == (
         'no chronological progress on committed segment')
-    assert segment_abort_reason(10., .2, 0., None) == ''
+    assert segment_abort_reason(10., .2, 0., None) == (
+        'no chronological progress on committed segment')
+    assert segment_abort_reason(10., .1, 0., None) == ''
     assert segment_abort_reason(10., 1., 9., None) == ''
     assert segment_abort_reason(10., 1., 9., None, 9.0) == (
         'remaining committed path became invalid')
 
 
-def test_gentle_motion_preserves_slow_and_short_segment_intent():
+def test_gentle_motion_preserves_only_explicit_slow_intent_by_default():
     assert gentle_motion_requested(.09, 2.0)
-    assert gentle_motion_requested(.30, .12)
+    assert not gentle_motion_requested(.30, .12)
+    assert gentle_motion_requested(.30, .12, maximum_segment=.15)
     assert not gentle_motion_requested(.12, 2.0)
     assert not gentle_motion_requested(
         .09, .12, active_segment=False)

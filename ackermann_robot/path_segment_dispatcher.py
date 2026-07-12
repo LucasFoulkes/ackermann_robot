@@ -110,7 +110,7 @@ class PathSegmentDispatcher(Node):
         self.declare_parameter('segment_no_progress_timeout_s', 6.0)
         self.declare_parameter('segment_progress_epsilon_m', 0.05)
         self.declare_parameter('segment_wrong_direction_timeout_s', 0.75)
-        self.declare_parameter('segment_watch_min_length_m', 0.30)
+        self.declare_parameter('segment_watch_min_length_m', 0.18)
         self.declare_parameter('segment_path_check_period_s', 0.50)
         self.declare_parameter('segment_path_check_horizon_m', 1.50)
         self.declare_parameter('segment_blocked_path_timeout_s', 0.75)

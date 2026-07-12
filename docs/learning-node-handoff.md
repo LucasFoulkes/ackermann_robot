@@ -536,3 +536,24 @@ request threshold is 0.10 m/s and terminal distance is 0.15 m; normal
 0.12--0.14 m/s RPP cusp tracking remains continuous. Regression tests cover
 inactive-segment bypass. This supersedes the 0.14 m/s / 0.45 m settings in
 section 10.6.
+
+### 10.8 Fixed-distance terminal control removed
+
+Run `adaptive_drive_20260712_134816` at `99e0057` (tagged with the same
+timestamp) proved that reducing the terminal gentle threshold was not enough.
+The failure was deterministic and obstacle-independent. Three 0.227 m plans
+each made about 0.113 m normal progress, crossed the 0.15 m threshold, then
+pulse-coasted and remained 0.096--0.117 m from the endpoint. Nav2 requested
+0.12 m/s and Collision Monitor passed it unchanged; blocked fractions were
+zero. Other segments stopped similarly at 0.118--0.154 m. This was a fixed
+mode switch overriding the adaptive speed loop, not an inability to steer.
+
+The remaining-distance gentle trigger is now disabled (`0.0`). Continuous RPP
+motion stays under the learned breakaway/throttle/effort controller until the
+goal checker declares the endpoint reached. Bounded pulse-and-coast remains
+dormant unless a live FollowPath segment explicitly requests <=0.10 m/s.
+Additionally, `segment_watch_min_length_m` is reduced from 0.30 to 0.18 m,
+matching the minimum executable segment: no permitted short fragment can again
+wait for Nav2's roughly 20-second fallback merely because our six-second
+chronological watchdog ignored it. This supersedes the 0.15 m setting in
+section 10.7.

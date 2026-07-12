@@ -76,12 +76,14 @@ watchdog, stale sensor, or closer local obstacle; it does not raise speed or
 change curvature. Steering identification probe taps are disabled for this
 rollback verification.
 
-Low-speed requests (<=0.10 m/s) and the final 0.15 m of a committed segment are
-now treated as gentle motion rather than ordinary continuous-speed control.
-The actuator pre-steers, applies at most a 0.45 s pulse bounded to the learned
-directional breakaway plus 6 us, returns to neutral, coasts for at least 0.35 s,
-and only then re-arms. This preserves Nav2's request to move gently without
-holding an ESC launch kick long enough to create the historical tiny lunge.
+Only explicit sub-floor speed requests (<=0.10 m/s) are treated as gentle
+motion rather than ordinary continuous-speed control. The remaining-distance
+trigger is disabled: armed evidence showed that switching modes at a fixed
+distance prevented the controller from adapting to the last path error. Nav2's
+goal checker owns terminal stopping, while the learned closed-loop throttle
+continues to own motion. For a genuinely slow request, the actuator pre-steers,
+applies at most a 0.45 s pulse bounded to learned directional breakaway plus
+6 us, returns to neutral, coasts for at least 0.35 s, and only then re-arms.
 Gentle control requires a currently active dispatcher-owned FollowPath segment;
 the dispatcher publishes an explicit empty segment when it finishes, so Nav2
 recovery actions such as BackUp always retain their normal continuous command.
@@ -140,7 +142,7 @@ in write mode; older sessions remain separate and are never appended.
 | opposite-direction command inside a segment | abort/replan within 0.75 s |
 | no chronological segment progress | abort/replan within 6.0 s |
 | newly blocked remaining path | abort/replan after 0.75 s persistent invalidity |
-| gentle launch pulse | <=0.55 s observed, then neutral/coast |
+| gentle launch pulse (only explicit <=0.10 m/s request) | <=0.55 s observed, then neutral/coast |
 
 Do not expect the radius to jump during a drive: evidence is persisted as it is
 collected, and the weakest learned branch is applied at the next safe launch.

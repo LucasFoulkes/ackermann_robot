@@ -206,7 +206,7 @@ def segment_abort_reason(now, segment_length, last_progress_at,
                          no_progress_timeout=6.0,
                          wrong_direction_timeout=.75,
                          blocked_path_timeout=.75,
-                         minimum_watched_length=.30):
+                         minimum_watched_length=.18):
     """Return why a committed direction segment must be replanned."""
     now = float(now)
     if (wrong_direction_since is not None and
@@ -223,12 +223,14 @@ def segment_abort_reason(now, segment_length, last_progress_at,
 
 
 def gentle_motion_requested(requested_speed, segment_remaining,
-                            maximum_request=.10, maximum_segment=.15,
+                            maximum_request=.10, maximum_segment=0.0,
                             active_segment=True):
     """Preserve low-speed/short-distance intent despite an ESC deadband."""
+    terminal_distance = abs(float(maximum_segment))
     return bool(active_segment) and (
         abs(float(requested_speed)) <= abs(float(maximum_request)) or
-        float(segment_remaining) <= abs(float(maximum_segment)))
+        (terminal_distance > 0.0 and
+         float(segment_remaining) <= terminal_distance))
 
 
 def limit_gentle_launch_pulse(target_pulse, learned_breakaway,

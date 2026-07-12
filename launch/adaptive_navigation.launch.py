@@ -83,7 +83,9 @@ def generate_launch_description():
                  'segment_no_progress_timeout_s': 6.0,
                  'segment_progress_epsilon_m': 0.05,
                  'segment_wrong_direction_timeout_s': 0.75,
-                 'segment_watch_min_length_m': 0.30,
+                 # Every segment we permit the dispatcher to execute is also
+                 # protected by the chronological progress watchdog.
+                 'segment_watch_min_length_m': 0.18,
                  'segment_path_check_period_s': 0.50,
                  'segment_path_check_horizon_m': 1.50,
                  'segment_blocked_path_timeout_s': 0.75,
