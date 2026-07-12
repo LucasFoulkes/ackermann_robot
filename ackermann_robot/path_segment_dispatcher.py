@@ -438,8 +438,13 @@ class PathSegmentDispatcher(Node):
         with self.metric_lock:
             metric = self.active_metric
             self.active_metric = None
-            if metric is None:
-                return ''
+        # An empty authoritative segment explicitly releases ownership. This
+        # prevents later Nav2 recovery behaviors (especially BackUp) from
+        # inheriting the completed FollowPath segment's terminal semantics.
+        self.segment_pub.publish(Path())
+        if metric is None:
+            return ''
+        with self.metric_lock:
             endpoint_xy, endpoint_yaw = self._pose_error(
                 self.pose, metric['samples'][-1])
         xte_p90 = percentile(metric['xte'], .90)

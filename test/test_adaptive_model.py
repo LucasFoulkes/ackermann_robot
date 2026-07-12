@@ -105,9 +105,11 @@ def test_segment_abort_detects_wrong_direction_and_no_progress():
 
 
 def test_gentle_motion_preserves_slow_and_short_segment_intent():
-    assert gentle_motion_requested(.12, 2.0)
-    assert gentle_motion_requested(.30, .30)
-    assert not gentle_motion_requested(.30, 2.0)
+    assert gentle_motion_requested(.09, 2.0)
+    assert gentle_motion_requested(.30, .12)
+    assert not gentle_motion_requested(.12, 2.0)
+    assert not gentle_motion_requested(
+        .09, .12, active_segment=False)
     assert limit_gentle_launch_pulse(1400., 1422., True) == 1416.
     assert limit_gentle_launch_pulse(1620., 1589., False) == 1595.
 

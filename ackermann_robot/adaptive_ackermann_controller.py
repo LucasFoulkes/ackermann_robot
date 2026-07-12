@@ -144,8 +144,8 @@ class AdaptiveAckermannController(Node):
             # The ESC cannot roll continuously at arbitrarily low speed. For
             # gentle requests and short committed segments, pre-steer, apply a
             # bounded learned breakaway pulse, then coast before re-arming.
-            'gentle_request_max_mps': .14,
-            'gentle_segment_length_m': .45,
+            'gentle_request_max_mps': .10,
+            'gentle_segment_length_m': .15,
             'gentle_steering_ready_us': 60.0,
             'gentle_min_coast_s': .35,
             'gentle_max_pulse_s': .45,
@@ -1038,7 +1038,8 @@ class AdaptiveAckermannController(Node):
             self.gentle_motion = gentle_motion_requested(
                 self.planner_cmd.linear.x, self.segment_remaining_m,
                 self.p['gentle_request_max_mps'],
-                self.p['gentle_segment_length_m'])
+                self.p['gentle_segment_length_m'],
+                active_segment=self.control_segment_samples is not None)
             if not self.gentle_motion:
                 self.gentle_coast_active = False
                 self.gentle_pulse_active = False

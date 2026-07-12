@@ -515,3 +515,24 @@ Do not raise speed for the next physical run. One-third faster is 0.40 m/s,
 which exceeds the current 0.35 m/s forward and 0.30 m/s reverse envelope and
 would worsen the observed late-obstacle margin. If this build passes, stage a
 separate 0.35 m/s-forward experiment while retaining 0.30 m/s reverse.
+
+### 10.7 Over-broad gentle-motion regression
+
+The first armed `df12aaf` run (`adaptive_drive_20260712_134034`) exposed a
+scope error in pulse-and-coast. A 1.337 m reverse segment drove normally until
+about 0.44 m remained, where the 0.45 m terminal threshold changed ordinary
+0.12 m/s cusp tracking into repeated 0.5 s pulses. It then made no net
+chronological progress and aborted. Subsequent 0.567 m replans repeated the
+pattern. More importantly, the completed segment remained cached while the BT
+ran its -0.10 m/s BackUp recovery; gentle control therefore modified BackUp as
+well, and recovery traveled too little to escape. The last fresh reverse path
+was correctly rejected by the new remaining-path validity check, after which
+the exhausted NavigateToPose goal aborted and the actuator stayed neutral.
+
+Correction: the dispatcher now publishes an empty authoritative segment on
+every backend completion. Gentle control is impossible without a live
+dispatcher segment, so behavior-server recovery commands bypass it. The slow
+request threshold is 0.10 m/s and terminal distance is 0.15 m; normal
+0.12--0.14 m/s RPP cusp tracking remains continuous. Regression tests cover
+inactive-segment bypass. This supersedes the 0.14 m/s / 0.45 m settings in
+section 10.6.

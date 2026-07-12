@@ -76,12 +76,15 @@ watchdog, stale sensor, or closer local obstacle; it does not raise speed or
 change curvature. Steering identification probe taps are disabled for this
 rollback verification.
 
-Low-speed requests (<=0.14 m/s) and the final 0.45 m of a committed segment are
+Low-speed requests (<=0.10 m/s) and the final 0.15 m of a committed segment are
 now treated as gentle motion rather than ordinary continuous-speed control.
 The actuator pre-steers, applies at most a 0.45 s pulse bounded to the learned
 directional breakaway plus 6 us, returns to neutral, coasts for at least 0.35 s,
 and only then re-arms. This preserves Nav2's request to move gently without
 holding an ESC launch kick long enough to create the historical tiny lunge.
+Gentle control requires a currently active dispatcher-owned FollowPath segment;
+the dispatcher publishes an explicit empty segment when it finishes, so Nav2
+recovery actions such as BackUp always retain their normal continuous command.
 
 ## Drive procedure
 

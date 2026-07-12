@@ -223,10 +223,12 @@ def segment_abort_reason(now, segment_length, last_progress_at,
 
 
 def gentle_motion_requested(requested_speed, segment_remaining,
-                            maximum_request=.14, maximum_segment=.45):
+                            maximum_request=.10, maximum_segment=.15,
+                            active_segment=True):
     """Preserve low-speed/short-distance intent despite an ESC deadband."""
-    return (abs(float(requested_speed)) <= abs(float(maximum_request)) or
-            float(segment_remaining) <= abs(float(maximum_segment)))
+    return bool(active_segment) and (
+        abs(float(requested_speed)) <= abs(float(maximum_request)) or
+        float(segment_remaining) <= abs(float(maximum_segment)))
 
 
 def limit_gentle_launch_pulse(target_pulse, learned_breakaway,

@@ -59,8 +59,10 @@ adaptive_ackermann_controller:
     # Low-speed intent is executed as bounded pulse-and-coast, not converted
     # into an indefinitely escalating launch. The active dispatcher segment is
     # authoritative for remaining distance.
-    gentle_request_max_mps: 0.14
-    gentle_segment_length_m: 0.45
+    # Normal RPP cusp tracking (0.12--0.14 m/s) must remain continuous. Only
+    # truly sub-floor requests or the final 0.15 m use pulse-and-coast.
+    gentle_request_max_mps: 0.10
+    gentle_segment_length_m: 0.15
     gentle_steering_ready_us: 60.0
     gentle_min_coast_s: 0.35
     gentle_max_pulse_s: 0.45
