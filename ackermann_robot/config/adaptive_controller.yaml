@@ -1,0 +1,172 @@
+adaptive_ackermann_controller:
+  ros__parameters:
+    # 2026-07-13 effort-native migration: all actuator quantities are
+    # normalized efforts in [-1, 1] (0 = declared neutral, +/-1 = declared
+    # safe extremes; forward drive is NEGATIVE on this chassis). Pulse
+    # microseconds now exist only inside pca9685_effort_driver. Conversion
+    # used: throttle (us-1500)/320; steering (us-1463)/463 below neutral,
+    # /537 above. Hardware params (i2c, channels, neutrals) moved to the
+    # driver, which reads them from the birth certificate.
+    control_rate_hz: 50.0
+    command_timeout_s: 0.50
+    odom_timeout_s: 0.50
+    scan_timeout_s: 0.50
+    obstacle_stop_m: 0.20
+    maximum_forward_speed_mps: 0.35
+    maximum_reverse_speed_mps: 0.30
+    # RPP cruise ceiling. The actuator maximum above remains a hard clamp;
+    # publishing it as a Nav2 speed limit previously raised RPP from its
+    # configured 0.30 m/s to 0.35 m/s.
+    navigation_speed_limit_mps: 0.30
+    maximum_measured_speed_mps: 0.55
+    # Recorded neutral-stop events gave a 25th-percentile deceleration of
+    # 0.453 m/s^2. The 0.10 s reaction term is the C1's typical scan period.
+    minimum_braking_deceleration_mps2: 0.45
+    sensor_reaction_time_s: 0.10
+    # Smallest odd causal window that rejects one isolated odom spike.
+    odom_velocity_median_samples: 3
+    maximum_curvature_1pm: 1.15
+    # Smac uses only this fraction of the learned physical curvature. The
+    # remaining authority is reserved for local tracking correction.
+    planning_curvature_utilization: 0.80
+    # Bootstrap prior, not a permanent minimum. The cusp dispatcher learns
+    # trackable curvature separately for forward/reverse and left/right.
+    # <= 0 selects the geometry-scaled bootstrap: wheelbase / tan(cautious
+    # wheel angle) — §11.1's portable prior. On this chassis that yields
+    # ~1.31 m at 12°, matching the historical 1.30 hand constant.
+    planner_trackability_prior_radius_m: -1.0
+    planner_bootstrap_wheel_angle_deg: 12.0
+    planner_trackability_state_path: "~/.robot/planner_trackability.yaml"
+    motion_threshold_mps: 0.025
+    breakaway_threshold_mps: 0.045
+    # Measured 2026-07-11 (esc_sustain_floor_id): rolling dies below ~0.08
+    # m/s both directions, 0.10 crawl is marginal (recoveries). Floor for
+    # steering-slowdown and lag evaluation; never command slower than this.
+    minimum_sustain_speed_mps: 0.12
+    # Zero selects the local slope of the measured direction-specific map.
+    throttle_kp_effort_per_mps: 0.0
+    throttle_ki_effort_per_m: 0.094          # was 30 us/m
+    # Retained from the successful experiment controller: applied only on
+    # fresh odometry and never limits an immediate safety neutral command.
+    throttle_rolling_slew_per_odom: 0.019    # was 6 us/odom
+    # Priors are medians of 31 forward and 35 reverse delay-aligned starts
+    # from the 11:13 run (1403/1611 us). Soft thresholds; update per launch.
+    forward_breakaway_prior_effort: -0.303
+    reverse_breakaway_prior_effort: 0.347
+    breakaway_forgetting_factor: 0.90
+    # Post-breakaway drop lands this much (in speed units, converted via the
+    # local map slope) weaker than the sustain effort while the robust
+    # observer confirms motion. Speed units because a fixed offset was worth
+    # ~2x more speed in reverse (shallow slope) and caused reverse stalls.
+    startup_drop_through_mps: 0.15
+    # Low-speed intent is executed as bounded pulse-and-coast, not converted
+    # into an indefinitely escalating launch. The active dispatcher segment
+    # is authoritative for remaining distance.
+    gentle_request_max_mps: 0.10
+    gentle_segment_length_m: 0.0
+    gentle_steering_ready_effort: 0.12       # was 60 us
+    gentle_min_coast_s: 0.35
+    gentle_max_pulse_s: 0.45
+    gentle_rearm_speed_mps: 0.025
+    gentle_launch_max_extra_effort: 0.019    # was 6 us
+    # Stalling within this path distance of a cusp is an intended stop:
+    # coast (steering pre-positions for the next segment) instead of the
+    # recovery kick; fall back to recovery if the command persists.
+    planned_stop_cusp_m: 0.40
+    planned_stop_wait_s: 2.0
+    # RPP (Jazzy) flip-flops command sign near path inversions while the
+    # robot still carries old motion (measured +-+-+ churn; vehicle rock-back
+    # measured ZERO by esc_direction_flip_id). Launch/flip only after the
+    # commanded sign is stable this long.
+    direction_flip_debounce_s: 0.5
+    # Stage-2 probe scheduler: alternating steering taps (~2 mm path
+    # deviation) during steady straight cruising. Measure-only; disabled.
+    probe_enabled: false
+    probe_amplitude_effort: 0.016            # was 8 us
+    probe_duration_s: 0.5
+    probe_interval_s: 4.0
+    probe_max_curvature_1pm: 0.15
+    probe_clearance_margin_m: 0.30
+    probe_min_stop_distance_m: 1.0
+    maximum_throttle_trim_effort: 0.125      # was 40 us
+    forward_rolling_min_effort: -0.375       # was 1380 us
+    reverse_rolling_max_effort: 0.4375       # was 1640 us
+    # Full declared authority: +/-1 by definition in the effort domain.
+    forward_recovery_limit_effort: -1.0
+    reverse_recovery_limit_effort: 1.0
+    recovery_step_effort: 0.031              # was 10 us
+    recovery_limit_dwell_samples: 10
+    steering_slew_per_s: 2.0                 # was 1000 us/s (~500 us span)
+    steering_slowdown_error_effort: 0.06     # was 30 us
+    steering_learning_min_speed_mps: 0.10
+    # Continuous identification windows used during ordinary Nav2 goals.
+    steering_identification_window_s: 0.55
+    steering_identification_min_distance_m: 0.06
+    steering_rls_forgetting_factor: 0.995
+    steering_rls_min_observations: 12
+    steering_rls_full_confidence_observations: 42
+    steering_rls_residual_limit_1pm: 0.50
+    steering_delay_candidates_s: [0.0, 0.10, 0.20, 0.30, 0.40, 0.50]
+    steering_delay_forgetting_factor: 0.98
+    steering_delay_min_observations: 12
+    # Two-speed steering step experiment 2026-07-11 (steering_step_id, 48
+    # steps, hardwood): forward lag is a pure time delay (t50 speed-
+    # invariant, d0 CI includes zero); reverse fits 0.168 s + 3.3 cm / v.
+    # Measured through the odometry pipeline, so directly valid for preview.
+    steering_lag_time_forward_s: 0.235
+    steering_lag_time_reverse_s: 0.168
+    steering_lag_distance_forward_m: 0.0
+    steering_lag_distance_reverse_m: 0.033
+    apply_path_preview_compensation: false
+    apply_path_curvature_floor: false
+    path_curvature_floor_max_lateral_error_m: 0.20
+    path_curvature_floor_max_heading_error_rad: 0.50
+    # Shadow mode: RLS keeps identifying/logging, corrections not applied.
+    apply_steering_models: false
+    # Stage D promotion 2026-07-12: the learned monotone map drives steering
+    # inside |kappa| <= 0.6; dense map outside the region and as automatic
+    # rollback champion.
+    learned_steering_mode: blend
+    # Rollback threshold calibrated from the 2026-07-12 drill: 0.65 catches
+    # gross failures without false trips; finer regressions are the
+    # between-session scorecard's job.
+    learned_steering_rollback_error_1pm: 0.65
+    # Stage C applied 2026-07-13: learned first-order dynamics drive the
+    # preview horizon. Set to 'shadow' to fall back.
+    learned_dynamics_mode: applied
+    # Session B 2026-07-13: learned two-point throttle line drives the
+    # feedforward; config map remains the fallback while anchors are thin.
+    learned_throttle_mode: applied
+    vehicle_wheelbase_m: 0.2775
+    # A committed Nav2 path remains authoritative until it is replaced.
+    path_timeout_s: 0.0
+    # Must agree with MPPI/RPP inversion tolerance. An opposite-direction
+    # command is passed only when the robot is stopped inside this cusp ball.
+    path_inversion_tolerance_m: 0.12
+    cusp_guard_entry_m: 0.18
+    cusp_guard_departure_m: 0.08
+    enable_external_path_interpretation: false
+    # Same measured transform and rectangle used by Xacro/Nav2.
+    lidar_x_m: 0.237
+    lidar_y_m: 0.0
+    lidar_yaw_rad: 3.141592653589793
+    footprint_front_x_m: 0.40
+    footprint_rear_x_m: -0.10
+    footprint_half_width_m: 0.16
+    # Must match the RPP parameters in nav2_odom_experiment.yaml.
+    rpp_lookahead_time_s: 1.5
+    rpp_min_lookahead_m: 0.30
+    rpp_max_lookahead_m: 0.75
+    runtime_model_path: "~/.robot/adaptive_ackermann_runtime.yaml"
+    drive_log_directory: "~/.robot/drive_logs"
+    # Flattened pairs are [speed magnitude m/s, drive effort].
+    # Re-measured 2026-07-11 (steering_step_id straight blocks, n=9/point,
+    # sd < 1.2 us); converted 2026-07-13 from 1419.05/1413.19 and
+    # 1590.34/1594.57 us.
+    forward_throttle_map: [0.148, -0.253, 0.302, -0.2713]
+    reverse_throttle_map: [0.138, 0.2823, 0.309, 0.2955]
+    # Flattened pairs are [signed curvature 1/m, steering effort]. Direction
+    # matters. 2026-07-11 step experiment: the forward center point carries
+    # its measured +0.033 1/m bias (was 1451.54 us -> -0.0248 effort).
+    forward_steering_map: [-1.35036, -1.0, -1.34213, -0.987, -1.24486, -0.879, -1.07376, -0.7726, -0.90097, -0.6596, -0.76816, -0.5608, -0.60127, -0.4583, -0.46105, -0.3607, -0.26575, -0.2441, -0.1385, -0.1361, 0.033, -0.0248, 0.13025, 0.0689, 0.33769, 0.162, 0.53052, 0.2551, 0.64433, 0.3286, 0.8322, 0.417, 0.96921, 0.4858, 1.14126, 0.5577, 1.30429, 0.6191, 1.41142, 0.6706, 1.60169, 0.74, 1.68716, 0.7923, 1.82852, 0.8706, 1.99345, 0.9638]
+    reverse_steering_map: [-1.29043, -1.0, -1.29259, -0.987, -1.19128, -0.879, -1.06766, -0.7726, -0.92624, -0.6596, -0.80051, -0.5608, -0.66064, -0.4583, -0.51885, -0.3607, -0.3608, -0.2441, -0.22125, -0.1361, 0.0, 0.0232, 0.07197, 0.0689, 0.24774, 0.162, 0.41077, 0.2551, 0.53064, 0.3286, 0.70411, 0.417, 0.8357, 0.4858, 0.99254, 0.5577, 1.16525, 0.6191, 1.26612, 0.6706, 1.44937, 0.74, 1.51378, 0.7923, 1.60886, 0.8706, 1.75192, 0.9638]

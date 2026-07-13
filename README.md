@@ -1,18 +1,31 @@
 # ackermann_robot
 
-Clean ROS 2 package retained in the original Git repository so the previous
-implementation remains available in history.
+Self-learning Ackermann robot: an encoder-less 1/10 crawler that learns to
+drive from ordinary Nav2 goals, given only a per-vehicle "birth certificate"
+(geometry, actuator channels/neutrals/safe bounds — no calibration, no
+polarity). Amnesia exam passed 2026-07-13: memory wiped + config falsified,
+24/26 goals across three from-scratch sessions.
 
-The package now contains a measured robot description, lidar/MOLA bringup,
-isolated drivetrain experiments, and an experimental adaptive Nav2 controller.
-The integrated actuator results, safety limits, architecture, and operating
-procedure are in
-[`docs/throttle-steering-adaptive-control.md`](docs/throttle-steering-adaptive-control.md).
+Multi-package repository (nav2-style):
 
-## Known robot measurements
+| Package | Role |
+|---|---|
+| [`adaptive_ackermann/`](adaptive_ackermann/) | The portable brain: learning controller + cusp dispatcher + offline refit tools. Hardware-free, effort-native — never sees a pulse unit. |
+| [`adaptive_ackermann_msgs/`](adaptive_ackermann_msgs/) | The one interface: `EffortCommand` (normalized [-1, 1] per actuator, sign semantics learned not declared). Standalone so drivers depend on the message, never on the brain. |
+| [`ackermann_robot/`](ackermann_robot/) | THIS vehicle's bringup: birth certificate, launch, Nav2 configs, URDF, `tf_odom_bridge` (MOLA TF → /odom), operating tools (`tools/preflight_session.sh`, `tools/auto_coverage_drive.py`, `tools/amnesia_exam.sh`), docs, and `history/` (archived µs-era experiments + data). |
 
-All dimensions below came from the previous robot description. Values marked
-as estimates should be measured again before they are used in a new model.
+The hardware driver lives outside this repo (`pca9685_effort_driver`):
+drivers are per-substrate plugins, ~100 lines each — see the effort contract
+in [`adaptive_ackermann/README.md`](adaptive_ackermann/README.md).
+
+Start a session: `bash ackermann_robot/tools/preflight_session.sh` (kills
+zombies, clears DDS shared memory, checks I2C, launches armed, health-gates,
+prints READY).
+
+## Vehicle measurements
+
+Reference frame: rear axle center projected onto the ground; +X forward,
++Y left, +Z up.
 
 | Measurement | Value |
 |---|---:|
@@ -27,14 +40,7 @@ as estimates should be measured again before they are used in a new model.
 | Inner gap between wheels | 0.190 m |
 | Approximate overall wheel width | 0.304 m |
 
-Reference frame used previously: the rear axle center projected onto the
-ground, with positive X forward, positive Y left, and positive Z upward.
-
 | Sensor center | X | Y | Z | Yaw |
 |---|---:|---:|---:|---:|
 | RPLIDAR C1 | 0.237 m | 0 m | 0.165 m | 180 degrees |
 | RealSense D435i prism | 0.2975 m | 0 m | 0.1275 m | 0 degrees |
-
-The old Nav2 configuration used a 0.43 x 0.28 m planning footprint and a
-1.3 m minimum turning radius. These were planning/tuning values, not direct
-physical measurements.

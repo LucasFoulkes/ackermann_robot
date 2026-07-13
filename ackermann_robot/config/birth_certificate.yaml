@@ -1,0 +1,31 @@
+# Birth certificate — the ONLY facts a human supplies for a new vehicle
+# (universal-adaptive-ackermann.md §3). Physical identity and safe electrical
+# bounds; NO calibration, NO learned values, NO polarity (learned from first
+# motion). Everything else the robot learns from ordinary driving.
+schema_version: 1
+vehicle_name: orange-crawler-1
+
+vehicle:
+  wheelbase_m: 0.2775
+  footprint:
+    front_x_m: 0.40
+    rear_x_m: -0.10
+    half_width_m: 0.16
+
+lidar:
+  x_m: 0.237
+  y_m: 0.0
+  yaw_rad: 3.141592653589793
+
+actuators:
+  throttle:
+    channel: 14
+    neutral_us: 1500.0
+    safe_min_us: 1180.0
+    safe_max_us: 1820.0
+    esc_mode: forward_reverse
+  steering:
+    channel: 12
+    approximate_neutral_us: 1463.0
+    safe_min_us: 1000.0
+    safe_max_us: 2000.0
