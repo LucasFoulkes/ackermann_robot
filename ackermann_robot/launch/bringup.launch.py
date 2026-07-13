@@ -103,7 +103,9 @@ def generate_launch_description():
     )
 
     # The navigation stack starts immediately but remains safe while lidar/MOLA
-    # initialize: stale scan or odometry forces the actuator controller neutral.
+    # initialize: stale scan or odometry forces the controller to command
+    # neutral effort, and the driver's reference-timeout deadman holds neutral
+    # whenever the controller itself goes quiet.
     adaptive_navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -123,6 +125,7 @@ def generate_launch_description():
             'ros2', 'bag', 'record',
             '/tf', '/tf_static', '/scan', '/odom',
             '/cmd_vel_nav_raw', '/cmd_vel_nav', '/cmd_vel',
+            '/actuator_effort', '/driver/debug', '/speed_limit',
             '/plan', '/unsmoothed_plan', '/controller_segment_plan',
             '/controller/debug', '/controller/limits',
             '/planner_trackability',
@@ -148,8 +151,9 @@ def generate_launch_description():
             'arm_hardware',
             default_value='false',
             description=(
-                'Enable physical PCA9685 throttle and steering output. '
-                'False runs the complete stack with actuators disarmed.'
+                'Arm the pca9685_effort_driver (physical throttle and '
+                'steering output). False runs the complete stack, including '
+                'the driver, with no I2C writes.'
             ),
         ),
         DeclareLaunchArgument(
