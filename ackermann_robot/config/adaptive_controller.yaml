@@ -12,13 +12,16 @@ adaptive_ackermann_controller:
     odom_timeout_s: 0.50
     scan_timeout_s: 0.50
     obstacle_stop_m: 0.20
-    maximum_forward_speed_mps: 0.35
+    maximum_forward_speed_mps: 0.45
     maximum_reverse_speed_mps: 0.30
-    # RPP cruise ceiling. The actuator maximum above remains a hard clamp;
-    # publishing it as a Nav2 speed limit previously raised RPP from its
-    # configured 0.30 m/s to 0.35 m/s.
-    navigation_speed_limit_mps: 0.30
-    maximum_measured_speed_mps: 0.55
+    # RPP cruise ceiling (must match desired_linear_vel in
+    # nav2_odom_experiment.yaml). Raised 0.30 -> 0.40 on 2026-07-13; the
+    # actuator maximum above stays a hard clamp with headroom so the
+    # published speed limit, not the clamp, shapes cruise.
+    navigation_speed_limit_mps: 0.40
+    # Overspeed fault tripwire: must clear launch transients above the new
+    # 0.40 cruise (0.55 would leave only 0.15 m/s of launch margin).
+    maximum_measured_speed_mps: 0.65
     # Recorded neutral-stop events gave a 25th-percentile deceleration of
     # 0.453 m/s^2. The 0.10 s reaction term is the C1's typical scan period.
     minimum_braking_deceleration_mps2: 0.45
