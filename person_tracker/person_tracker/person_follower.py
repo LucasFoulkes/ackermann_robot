@@ -48,7 +48,7 @@ class PersonFollower(Node):
             'command_topic': '/cmd_vel_nav_raw',
             'desired_distance_m': 0.5,
             'arrive_tolerance_m': 0.10,
-            'max_speed_mps': 0.40,
+            'max_speed_mps': 0.60,
             'speed_gain': 0.8,          # m/s per metre of distance error
             'max_curvature_1pm': 1.1,
             # |bearing| above this: crawl on a max-curvature arc instead of
@@ -57,6 +57,12 @@ class PersonFollower(Node):
             'crawl_speed_mps': 0.14,
             'lost_timeout_s': 2.0,
             'control_rate_hz': 10.0,
+            # Commanding forward but not moving this long (arc jammed into
+            # an obstacle / gate hold) -> back straight up briefly to open
+            # the front, then retry. Ackermann has no other escape.
+            'stall_escape_after_s': 3.0,
+            'escape_duration_s': 2.0,
+            'escape_speed_mps': 0.14,
         }
         for key, value in defaults.items():
             self.declare_parameter(key, value)
@@ -65,7 +71,10 @@ class PersonFollower(Node):
         self.person = None
         self.person_stamp = None
         self.pose = None
+        self.robot_speed = 0.0
         self.was_commanding = False
+        self.stalled_since = None
+        self.escape_until = None
 
         self.create_subscription(PoseStamped, self.p['person_topic'],
                                  self._person, 10)
@@ -86,6 +95,7 @@ class PersonFollower(Node):
     def _odom(self, msg):
         self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
                      yaw_from_quaternion(msg.pose.pose.orientation))
+        self.robot_speed = abs(msg.twist.twist.linear.x)
 
     def _stop(self):
         if self.was_commanding:
@@ -101,6 +111,16 @@ class PersonFollower(Node):
         if not fresh or self.pose is None:
             self._stop()
             return
+        seconds = now.nanoseconds / 1e9
+        if self.escape_until is not None:
+            if seconds < self.escape_until:
+                command = Twist()
+                command.linear.x = -self.p['escape_speed_mps']
+                self.command_pub.publish(command)
+                self.was_commanding = True
+                return
+            self.escape_until = None
+            self.stalled_since = None
         dx = self.person.pose.position.x - self.pose[0]
         dy = self.person.pose.position.y - self.pose[1]
         distance = math.hypot(dx, dy)
@@ -126,6 +146,17 @@ class PersonFollower(Node):
         command.angular.z = float(command.linear.x * curvature)
         self.command_pub.publish(command)
         self.was_commanding = True
+        # Jam detection: forward commanded, robot pinned (obstacle gate or
+        # blocked arc) -> reverse briefly to reopen the front.
+        if command.linear.x > 0.05 and self.robot_speed < 0.03:
+            if self.stalled_since is None:
+                self.stalled_since = seconds
+            elif seconds - self.stalled_since > self.p['stall_escape_after_s']:
+                self.escape_until = seconds + self.p['escape_duration_s']
+                self.get_logger().info(
+                    'front jammed: reversing to open space, then retrying')
+        else:
+            self.stalled_since = None
 
 
 def main(args=None):

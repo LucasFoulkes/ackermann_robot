@@ -4,13 +4,36 @@ import os
 import time
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
+                            IncludeLaunchDescription, RegisterEventHandler)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+# Session hygiene, embedded so ONE `ros2 launch` is the whole entry point
+# (replaces the preflight shell wrapper): kill any previous session's nodes
+# and stale `ros2 launch`/bag parents (never our own), clear stale FastDDS
+# shared-memory locks (hard-kill leftovers silently break discovery), and
+# probe the PCA9685 so a clamped I2C bus is announced up front.
+CLEANUP = r"""
+for pid in $(pgrep -f '[c]omponent_container|[c]ontroller_server|[p]lanner_server|[b]ehavior_server|[s]moother_server|[b]t_navigator|[l]ifecycle_manager|[c]ollision_monitor|[v]elocity_smoother|[p]ath_segment_dispatcher|[a]daptive_ackermann_controller|[p]ca9685_effort_driver|[t]f_odom_bridge|[p]erson_tracker|[p]erson_follower|[r]obot_state_publisher|[m]ola|[s]llidar|[r]os2 bag'); do
+  kill -9 $pid 2>/dev/null
+done
+for pid in $(pgrep -f '[r]os2 launch'); do
+  [ "$pid" != "$PPID" ] && kill -9 $pid 2>/dev/null
+done
+sleep 1
+rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null
+if ! timeout 8 i2cget -y 1 0x40 0x00 >/dev/null 2>&1; then
+  echo 'WARNING: PCA9685 not answering at 0x40 (HAT unpowered, or bus clamped -> full Pi power-off needed)'
+fi
+echo 'session cleanup done'
+"""
 
 
 def generate_launch_description():
@@ -146,6 +169,17 @@ def generate_launch_description():
         output='screen',
     )
 
+    cleanup = ExecuteProcess(cmd=['bash', '-c', CLEANUP],
+                             name='session_cleanup', output='screen')
+    stack = [
+        robot_state_publisher,
+        lidar,
+        mola_odometry,
+        adaptive_navigation,
+        person_tracker,
+        person_follower,
+        flight_recorder,
+    ]
     return LaunchDescription([
         DeclareLaunchArgument(
             'serial_port',
@@ -180,11 +214,7 @@ def generate_launch_description():
             description='Also start person_tracker + person_follower '
                         '(follow-me mode).',
         ),
-        robot_state_publisher,
-        lidar,
-        mola_odometry,
-        adaptive_navigation,
-        person_tracker,
-        person_follower,
-        flight_recorder,
+        cleanup,
+        RegisterEventHandler(OnProcessExit(
+            target_action=cleanup, on_exit=stack)),
     ])
