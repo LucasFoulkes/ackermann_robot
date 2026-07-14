@@ -7,7 +7,7 @@
 LOG="${1:-/tmp/bringup_$(date +%H%M%S).log}"
 
 echo "[preflight] stopping any existing stack..."
-pgrep -af "component_container|controller_server|planner_server|behavior_server|smoother_server|bt_navigator|lifecycle_manager|collision_monitor|velocity_smoother|path_segment_dispatcher|adaptive_ackermann|pca9685_effort_driver|tf_odom_bridge|robot_state_publisher|mola|sllidar|ros2 bag|rplidar" \
+pgrep -af "component_container|controller_server|planner_server|behavior_server|smoother_server|bt_navigator|lifecycle_manager|collision_monitor|velocity_smoother|path_segment_dispatcher|adaptive_ackermann|pca9685_effort_driver|tf_odom_bridge|person_tracker|person_follower|robot_state_publisher|mola|sllidar|ros2 bag|rplidar" \
   | grep -v grep | awk '{print $1}' | xargs -r kill 2>/dev/null
 sleep 4
 pgrep -af "mola|sllidar|bt_navigator|adaptive|dispatcher|planner_server|pca9685|tf_odom" \
