@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
-"""Follow the confirmed person with a direct pursuit law (v2).
+"""Follow the confirmed person — hybrid (v3).
 
-v1 used the Nav2 BT approach (GoalUpdater + TruncatePath + replanning).
-The docs recommend a dedicated Following Server for MOVING targets — a
-direct smooth control law with no global planning — but opennav_following
-is not released for Jazzy, so this node implements the same pattern:
+Two modes, each using the subsystem proven at that job:
 
-  person pose (10 Hz) -> pure-pursuit arc toward the person
-                      -> speed proportional to (distance - desired)
-                      -> Twist into the EXISTING safety chain
+CHASE (person inside the front cone): direct velocity streaming using the
+Park–Kuipers graceful-motion control law — the same law Nav2's Following/
+Docking servers use. Curvature from the egocentric polar error, speed
+automatically collapsing with curvature demand. Reaction latency is one
+10 Hz tick. Commands flow through the normal safety chain
+(/cmd_vel_nav_raw -> adaptive limits -> collision monitor).
 
-Publishing on /cmd_vel_nav_raw means every layer that guards Nav2 driving
-also guards following: the adaptive controller clamps speed/curvature and
-applies steering-transition slowdown, Collision Monitor gates the result,
-and the launch ladder / obstacle stops behave exactly as in normal goals.
-No Smac, no cusp dispatcher, no behavior tree: reaction latency is one
-control tick instead of a replanning cycle.
-
-Ackermann reality: the robot cannot turn in place. A person far off-axis
-(or behind) is approached with a maximum-curvature forward arc at reduced
-speed; if there is no room to arc, the collision monitor holds it and the
-robot waits for the person to come around.
+REORIENT (person far off-axis or behind): an Ackermann with a ~1.2 m
+turning radius cannot swing its nose in place — forward-only chasing
+orbits the room and hand-rolled K-turns are a poor rewrite of what Smac
+Reeds-Shepp already does well. So: stream stops, ONE NavigateToPose goal
+is sent to the standoff point (default compute-once BT, cusp dispatcher
+executes the multi-point turn exactly like a normal goal), and the moment
+the person is back in the front cone the goal is canceled and CHASE
+resumes. No goal updates mid-maneuver -> no replan churn.
 """
 
 import math
 
 import rclpy
+from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
+from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
+from rclpy.action import ActionClient
 from rclpy.node import Node
 
 
@@ -49,21 +49,24 @@ class PersonFollower(Node):
             'desired_distance_m': 0.5,
             'arrive_tolerance_m': 0.10,
             'max_speed_mps': 0.60,
-            'speed_gain': 0.8,          # m/s per metre of distance error
+            'speed_gain': 0.8,           # m/s per metre of distance error
             'max_curvature_1pm': 1.1,
-            # |bearing| above this: K-turn (alternating fwd/rev arcs with
-            # opposite steering — a 3-point turn) instead of orbiting the
-            # room on a forward-only max-curvature circle.
-            'hard_turn_bearing_rad': 0.9,
-            # ...and below this the K-turn hands back to normal pursuit.
-            'kturn_exit_bearing_rad': 0.5,
-            'kturn_phase_s': 1.5,
-            'crawl_speed_mps': 0.18,
+            # Park-Kuipers law: kappa = (k2*bearing + sin(bearing)) / r,
+            # v = vmax / (1 + beta*|kappa|^lambda) — speed collapses as
+            # curvature demand rises (graceful approach, no orbiting).
+            'k2': 2.0,
+            'beta': 0.4,
+            'lambda': 2.0,
+            # Person beyond this bearing: hand the turn-around to Smac.
+            'reorient_enter_bearing_rad': 0.9,
+            # ...and back in this cone: cancel the maneuver, resume chase.
+            'reorient_done_bearing_rad': 0.4,
+            'reorient_timeout_s': 25.0,
+            'retry_backoff_s': 2.5,
+            'standoff_m': 0.5,
             'lost_timeout_s': 2.0,
             'control_rate_hz': 10.0,
-            # Commanding forward but not moving this long (arc jammed into
-            # an obstacle / gate hold) -> back straight up briefly to open
-            # the front, then retry. Ackermann has no other escape.
+            # Chase-mode jam escape (nose pinned by the obstacle gate).
             'stall_escape_after_s': 3.0,
             'escape_duration_s': 2.0,
             'escape_speed_mps': 0.14,
@@ -76,24 +79,28 @@ class PersonFollower(Node):
         self.person_stamp = None
         self.pose = None
         self.robot_speed = 0.0
+        self.mode = 'chase'
         self.was_commanding = False
         self.stalled_since = None
         self.escape_until = None
-        self.kturn_phase = None       # None | 'fwd' | 'rev'
-        self.kturn_phase_until = 0.0
+        self.goal_handle = None
+        self.goal_pending = False
+        self.reorient_started = None
+        self.retry_after = None
 
         self.create_subscription(PoseStamped, self.p['person_topic'],
                                  self._person, 10)
         self.create_subscription(Odometry, '/odom', self._odom, 20)
         self.command_pub = self.create_publisher(
             Twist, self.p['command_topic'], 10)
+        self.navigator = ActionClient(self, NavigateToPose,
+                                      'navigate_to_pose')
         self.create_timer(1.0 / self.p['control_rate_hz'], self._tick)
         self.get_logger().info(
-            'person_follower v2 (direct pursuit): desired distance '
-            f"{self.p['desired_distance_m']} m, reacting at "
-            f"{self.p['control_rate_hz']:.0f} Hz through the normal "
-            'safety chain')
+            'person_follower v3 (hybrid): graceful-law chase in the front '
+            'cone, one-shot Smac maneuver to reorient')
 
+    # ------------------------------------------------------------ inputs --
     def _person(self, msg):
         self.person = msg
         self.person_stamp = self.get_clock().now()
@@ -103,21 +110,58 @@ class PersonFollower(Node):
                      yaw_from_quaternion(msg.pose.pose.orientation))
         self.robot_speed = abs(msg.twist.twist.linear.x)
 
-    def _stop(self):
+    # ------------------------------------------------------------- modes --
+    def _stop_stream(self):
         if self.was_commanding:
             self.command_pub.publish(Twist())
             self.was_commanding = False
-            self.get_logger().info('holding (person lost or at distance)')
+
+    def _cancel_maneuver(self, reason):
+        if self.goal_handle is not None:
+            self.get_logger().info(f'maneuver canceled: {reason}')
+            self.goal_handle.cancel_goal_async()
+            self.goal_handle = None
+        self.reorient_started = None
+        self.mode = 'chase'
 
     def _tick(self):
         now = self.get_clock().now()
+        seconds = now.nanoseconds / 1e9
         fresh = (self.person_stamp is not None and
                  (now - self.person_stamp).nanoseconds / 1e9
                  < self.p['lost_timeout_s'])
         if not fresh or self.pose is None:
-            self._stop()
+            self._stop_stream()
+            if self.mode == 'reorient':
+                self._cancel_maneuver('person lost')
             return
-        seconds = now.nanoseconds / 1e9
+        dx = self.person.pose.position.x - self.pose[0]
+        dy = self.person.pose.position.y - self.pose[1]
+        distance = math.hypot(dx, dy)
+        error = distance - self.p['desired_distance_m']
+        bearing = wrap(math.atan2(dy, dx) - self.pose[2])
+
+        if self.mode == 'reorient':
+            if abs(bearing) < self.p['reorient_done_bearing_rad']:
+                self._cancel_maneuver('person back in front cone')
+            elif (self.reorient_started is not None and
+                    seconds - self.reorient_started
+                    > self.p['reorient_timeout_s']):
+                self._cancel_maneuver('maneuver timeout')
+            elif self.goal_handle is None and not self.goal_pending:
+                self.mode = 'chase'      # aborted/finished; chase decides
+            return                       # Nav2 owns the wheels right now
+
+        # ---------------------------------------------------------- chase --
+        if error < self.p['arrive_tolerance_m']:
+            self._stop_stream()
+            self.stalled_since = None
+            return
+        if (abs(bearing) > self.p['reorient_enter_bearing_rad']
+                and (self.retry_after is None or now >= self.retry_after)):
+            self._stop_stream()
+            self._start_maneuver(dx, dy, distance)
+            return
         if self.escape_until is not None:
             if seconds < self.escape_until:
                 command = Twist()
@@ -127,59 +171,19 @@ class PersonFollower(Node):
                 return
             self.escape_until = None
             self.stalled_since = None
-        dx = self.person.pose.position.x - self.pose[0]
-        dy = self.person.pose.position.y - self.pose[1]
-        distance = math.hypot(dx, dy)
-        error = distance - self.p['desired_distance_m']
-        if error < self.p['arrive_tolerance_m']:
-            self._stop()
-            return
-        bearing = wrap(math.atan2(dy, dx) - self.pose[2])
-        # --- K-turn (3-point turn) when the person is far off-axis ---
-        # Forward arc steered toward them, then reverse arc steered away:
-        # both phases rotate the nose the SAME direction, turning around in
-        # the robot's own footprint instead of orbiting the room.
-        if self.kturn_phase is None:
-            if abs(bearing) > self.p['hard_turn_bearing_rad']:
-                self.kturn_phase = 'fwd'
-                self.kturn_phase_until = seconds + self.p['kturn_phase_s']
-                self.get_logger().info(
-                    f'K-turn: person at {math.degrees(bearing):+.0f} deg')
-        elif abs(bearing) < self.p['kturn_exit_bearing_rad']:
-            self.kturn_phase = None
-            self.get_logger().info('K-turn done; resuming pursuit')
-        if self.kturn_phase is not None:
-            if seconds >= self.kturn_phase_until:
-                self.kturn_phase = ('rev' if self.kturn_phase == 'fwd'
-                                    else 'fwd')
-                self.kturn_phase_until = seconds + self.p['kturn_phase_s']
-            sign = 1.0 if bearing > 0 else -1.0
-            command = Twist()
-            if self.kturn_phase == 'fwd':
-                command.linear.x = self.p['crawl_speed_mps']
-                kappa = sign * self.p['max_curvature_1pm']
-            else:
-                command.linear.x = -self.p['crawl_speed_mps']
-                kappa = -sign * self.p['max_curvature_1pm']
-            command.angular.z = command.linear.x * kappa
-            self.command_pub.publish(command)
-            self.was_commanding = True
-            self.stalled_since = None
-            return
-        # --- normal pursuit: arc whose chord ends at the person ---
-        curvature = 2.0 * math.sin(bearing) / max(distance, 0.3)
+        # Park-Kuipers graceful law (theta=0: no final-heading constraint).
+        curvature = (self.p['k2'] * bearing + math.sin(bearing)) \
+            / max(distance, 0.3)
         curvature = max(-self.p['max_curvature_1pm'],
                         min(self.p['max_curvature_1pm'], curvature))
-        speed = min(self.p['max_speed_mps'], self.p['speed_gain'] * error)
-        # Slow down while pointing away; full speed when aligned.
-        speed *= max(0.3, math.cos(bearing))
+        speed = self.p['max_speed_mps'] / (
+            1.0 + self.p['beta'] * abs(curvature) ** self.p['lambda'])
+        speed = min(speed, self.p['speed_gain'] * error)
         command = Twist()
         command.linear.x = float(max(0.0, speed))
         command.angular.z = float(command.linear.x * curvature)
         self.command_pub.publish(command)
         self.was_commanding = True
-        # Jam detection: forward commanded, robot pinned (obstacle gate or
-        # blocked arc) -> reverse briefly to reopen the front.
         if command.linear.x > 0.05 and self.robot_speed < 0.03:
             if self.stalled_since is None:
                 self.stalled_since = seconds
@@ -190,6 +194,55 @@ class PersonFollower(Node):
         else:
             self.stalled_since = None
 
+    # ---------------------------------------------------------- maneuver --
+    def _start_maneuver(self, dx, dy, distance):
+        if not self.navigator.server_is_ready():
+            self.get_logger().warning('navigate_to_pose not ready',
+                                      throttle_duration_sec=5.0)
+            return
+        scale = max(0.0, (distance - self.p['standoff_m']) / distance)
+        pose = PoseStamped()
+        pose.header.frame_id = 'odom'
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = self.pose[0] + dx * scale
+        pose.pose.position.y = self.pose[1] + dy * scale
+        yaw = math.atan2(dy, dx)
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        goal = NavigateToPose.Goal()
+        goal.pose = pose                # default BT: compute once, execute
+        self.goal_pending = True
+        self.mode = 'reorient'
+        self.reorient_started = self.get_clock().now().nanoseconds / 1e9
+        self.get_logger().info(
+            'person far off-axis: one-shot Smac maneuver to reorient')
+        future = self.navigator.send_goal_async(goal)
+        future.add_done_callback(self._goal_response)
+
+    def _goal_response(self, future):
+        self.goal_pending = False
+        handle = future.result()
+        if handle is None or not handle.accepted:
+            self.get_logger().warning('maneuver goal rejected')
+            self.mode = 'chase'
+            return
+        self.goal_handle = handle
+        handle.get_result_async().add_done_callback(self._result)
+
+    def _result(self, future):
+        try:
+            status = future.result().status
+        except Exception:
+            status = GoalStatus.STATUS_UNKNOWN
+        self.goal_handle = None
+        if status == GoalStatus.STATUS_ABORTED:
+            self.retry_after = self.get_clock().now() + \
+                rclpy.duration.Duration(seconds=self.p['retry_backoff_s'])
+            self.get_logger().warning(
+                f"maneuver aborted; backing off {self.p['retry_backoff_s']} s")
+        if self.mode == 'reorient':
+            self.mode = 'chase'
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -199,9 +252,15 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # Leave a zero command; the adaptive controller's command watchdog
-        # holds neutral once we stop publishing.
+        # Ctrl-C safety: cancel any active maneuver (bt_navigator would
+        # keep driving it) and leave a zero stream command.
         try:
+            if node.goal_handle is not None:
+                future = node.goal_handle.cancel_goal_async()
+                for _ in range(20):
+                    rclpy.spin_once(node, timeout_sec=0.1)
+                    if future.done():
+                        break
             node.command_pub.publish(Twist())
         except Exception:
             pass
