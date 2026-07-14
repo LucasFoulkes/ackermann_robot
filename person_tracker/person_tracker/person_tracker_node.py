@@ -64,14 +64,24 @@ class Track:
     def predict(self, dt):
         f = np.eye(4)
         f[0, 2] = f[1, 3] = dt
-        q = np.diag([0.01, 0.01, 0.20, 0.20]) * dt
+        # Velocity process noise sized for human acceleration (~1 m/s^2),
+        # not for chasing per-stride centroid swings.
+        q = np.diag([0.01, 0.01, 0.06, 0.06]) * dt
         self.state = f @ self.state
         self.cov = f @ self.cov @ f.T + q
+        if self.missed > 0:
+            # Unobserved: halve velocity each coasting frame so the track
+            # brakes to a stop instead of projecting the last stride
+            # forever (classic CV-Kalman runaway).
+            self.state[2:] *= 0.5
 
     def update(self, zx, zy, stamp):
         h = np.zeros((2, 4))
         h[0, 0] = h[1, 1] = 1.0
-        r = np.eye(2) * 0.03 ** 2
+        # The 'measurement' is the leg centroid: gait swings it 10-20 cm
+        # per stride and single-leg occlusion jumps it to one leg. Trusting
+        # it at +-3 cm made tracks visibly jumpy; +-12 cm averages strides.
+        r = np.eye(2) * 0.12 ** 2
         innovation = np.array([zx, zy]) - h @ self.state
         s = h @ self.cov @ h.T + r
         k = self.cov @ h.T @ np.linalg.inv(s)
@@ -222,7 +232,7 @@ class PersonTracker(Node):
             entry[2] += 1
             if (not entry[4] and cell not in protected
                     and stamp - entry[0] > promote
-                    and entry[2] > 0.6 * promote * 8):   # ~8 scans/s min
+                    and entry[2] > 0.4 * promote * 8):   # ~8 scans/s min
                 entry[4] = True                          # static furniture
 
     def _point_class(self, x, y):
@@ -350,8 +360,14 @@ class PersonTracker(Node):
                      > self.p['background_promote_s'] + 2.0)
         if warmed_up:
             for i in unclaimed:
-                self.tracks.append(
-                    Track(candidates[i]['x'], candidates[i]['y'], stamp))
+                # Furniture never steps into previously-free space: require
+                # dynamic-cell evidence to birth a track. (Cost: a person
+                # standing motionless since before boot is not tracked
+                # until their first step — the documented stage-1 gap.)
+                if candidates[i]['dynamic'] >= 0.3:
+                    self.tracks.append(
+                        Track(candidates[i]['x'], candidates[i]['y'],
+                              stamp))
 
     # ---------------------------------------------------------- publish --
     def _publish(self, stamp, legs, candidates):
