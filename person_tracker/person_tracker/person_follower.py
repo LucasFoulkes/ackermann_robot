@@ -180,6 +180,19 @@ class PersonFollower(Node):
         if self.mode == 'search':
             # Person reacquired while searching: back to direct behavior.
             self._cancel_maneuver('person reacquired')
+        if self.mode == 'avoid':
+            # Route-around: the person IS in the front cone (that is why
+            # chase was running), so a bearing-based exit would cancel it
+            # instantly (00:50 session: five aborted route-arounds in 16 s).
+            # Exit only on completion, timeout, or the person moving far.
+            if (self.reorient_started is not None and
+                    seconds - self.reorient_started
+                    > self.p['reorient_timeout_s']):
+                self._cancel_maneuver('route-around timeout')
+            elif self.goal_handle is None and not self.goal_pending:
+                self.mode = 'chase'
+            else:
+                return
         if self.mode == 'reorient':
             if abs(bearing) < self.p['reorient_done_bearing_rad']:
                 self._cancel_maneuver('person back in front cone')
@@ -262,7 +275,7 @@ class PersonFollower(Node):
                 self._stop_stream()
                 self._start_maneuver(self.person.pose.pose.position.x,
                                      self.person.pose.pose.position.y,
-                                     mode='reorient')
+                                     mode='avoid')
                 return
         else:
             self.stalled_since = None
@@ -317,9 +330,15 @@ class PersonFollower(Node):
             self.get_logger().warning(
                 f"maneuver aborted; backing off {self.p['retry_backoff_s']} s")
         if self.mode == 'search':
-            self.search_done = True      # one search per loss, then hold
-            self.get_logger().info('search finished; holding for the person')
-        if self.mode in ('reorient', 'search'):
+            if status == GoalStatus.STATUS_ABORTED:
+                # Planner failed (e.g. smeared costmap): allow another try
+                # after the backoff while the sighting is still fresh.
+                self.get_logger().info('search aborted; will retry')
+            else:
+                self.search_done = True
+                self.get_logger().info(
+                    'search finished; holding for the person')
+        if self.mode in ('reorient', 'search', 'avoid'):
             self.mode = 'chase'
 
 

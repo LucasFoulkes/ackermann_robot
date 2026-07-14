@@ -232,12 +232,19 @@ class PersonTracker(Node):
                      for dx in (-0.2, 0.0, 0.2) for dy in (-0.2, 0.0, 0.2)}
         for cell in free_cells:
             entry = self.cells.get(cell)
-            if entry is not None:
-                entry[3] += 1
-                if entry[3] > 4 and not entry[4]:
-                    # Repeatedly seen free: forget any stale occupancy so a
-                    # departed person's cells return to clean unknown.
-                    self.cells.pop(cell, None)
+            if entry is None:
+                # Open floor gets an entry too: a person stepping onto
+                # never-occupied ground must read was-free-now-occupied.
+                # (Without this, detection secretly depended on legs
+                # re-crossing their own trail — 110 s blind spells after
+                # the robot drove around, 2026-07-14 00:51 session.)
+                self.cells[cell] = [stamp, 0.0, 0, 1, False]
+            elif entry[2] > 0 and entry[3] > 4 and not entry[4]:
+                # Occupied in the past but repeatedly seen free since:
+                # forget the stale occupancy (departed person's trail).
+                self.cells.pop(cell, None)
+            else:
+                entry[3] = min(entry[3] + 1, 10)
         hit_cells = set(zip((xs / cell_m).astype(int),
                             (ys / cell_m).astype(int)))
         promote = self.p['background_promote_s']
@@ -520,6 +527,11 @@ class PersonTracker(Node):
                 markers.markers.append(dot)
         self.marker_pub.publish(markers)
         self.people_pub.publish(people)
+        if not any(t.confirmed for t in self.tracks):
+            self.get_logger().info(
+                f'no confirmed person: {len(legs)} leg clusters, '
+                f'{len(self.tracks)} tentative tracks, robot_speed '
+                f'{self.robot_speed:.2f}', throttle_duration_sec=10.0)
         if selected is not None:
             person = Odometry()
             person.header.frame_id = 'odom'
