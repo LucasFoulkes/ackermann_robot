@@ -1,53 +1,62 @@
 #!/usr/bin/env python3
-"""Close the loop: follow the (single) confirmed person.
+"""Follow the confirmed person with a direct pursuit law (v2).
 
-Consumes the tracker's best-person pose, runs one NavigateToPose action
-with the dynamic-following behavior tree (GoalUpdater + TruncatePath 0.9 m
-standoff), and streams fresh person poses onto /goal_update. Person lost
-longer than lost_timeout_s -> cancel the action, robot stops; person
-re-confirmed -> re-engage. All Nav2 safety layers (collision monitor,
-speed limit, adaptive controller gates) stay in the loop unchanged.
+v1 used the Nav2 BT approach (GoalUpdater + TruncatePath + replanning).
+The docs recommend a dedicated Following Server for MOVING targets — a
+direct smooth control law with no global planning — but opennav_following
+is not released for Jazzy, so this node implements the same pattern:
+
+  person pose (10 Hz) -> pure-pursuit arc toward the person
+                      -> speed proportional to (distance - desired)
+                      -> Twist into the EXISTING safety chain
+
+Publishing on /cmd_vel_nav_raw means every layer that guards Nav2 driving
+also guards following: the adaptive controller clamps speed/curvature and
+applies steering-transition slowdown, Collision Monitor gates the result,
+and the launch ladder / obstacle stops behave exactly as in normal goals.
+No Smac, no cusp dispatcher, no behavior tree: reaction latency is one
+control tick instead of a replanning cycle.
+
+Ackermann reality: the robot cannot turn in place. A person far off-axis
+(or behind) is approached with a maximum-curvature forward arc at reduced
+speed; if there is no room to arc, the collision monitor holds it and the
+robot waits for the person to come around.
 """
 
 import math
-import os
 
 import rclpy
-from action_msgs.msg import GoalStatus
-from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
-from rclpy.action import ActionClient
 from rclpy.node import Node
 
 
-def yaw_to_quaternion(yaw):
-    return 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+def yaw_from_quaternion(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def wrap(angle):
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 class PersonFollower(Node):
     def __init__(self):
         super().__init__('person_follower')
-        default_bt = os.path.join(
-            get_package_share_directory('person_tracker'),
-            'config', 'follow_person.xml')
         defaults = {
-            'follow_bt_xml': default_bt,
             'person_topic': '/person_tracker/person',
-            'goal_update_topic': '/goal_update',
-            'lost_timeout_s': 3.0,
-            'update_period_s': 0.5,
-            # Goal is planted this far SHORT of the person along the
-            # robot->person line: the person's own legs are lethal obstacles
-            # in the costmap, so a goal ON them can never be planned to
-            # (Smac burned its whole iteration budget trying).
-            'standoff_m': 0.5,
-            # Person closer than this: do not chase, just hold position.
-            'engage_min_distance_m': 1.4,
-            # After an aborted follow, wait this long before re-engaging so
-            # a persistent planning failure cannot loop at 2 Hz.
-            'retry_backoff_s': 2.5,
+            'command_topic': '/cmd_vel_nav_raw',
+            'desired_distance_m': 0.5,
+            'arrive_tolerance_m': 0.10,
+            'max_speed_mps': 0.40,
+            'speed_gain': 0.8,          # m/s per metre of distance error
+            'max_curvature_1pm': 1.1,
+            # |bearing| above this: crawl on a max-curvature arc instead of
+            # driving fast while pointing the wrong way.
+            'hard_turn_bearing_rad': 0.9,
+            'crawl_speed_mps': 0.14,
+            'lost_timeout_s': 2.0,
+            'control_rate_hz': 10.0,
         }
         for key, value in defaults.items():
             self.declare_parameter(key, value)
@@ -55,115 +64,68 @@ class PersonFollower(Node):
 
         self.person = None
         self.person_stamp = None
-        self.robot = None
-        self.goal_handle = None
-        self.goal_pending = False
-        self.retry_after = None
+        self.pose = None
+        self.was_commanding = False
 
         self.create_subscription(PoseStamped, self.p['person_topic'],
                                  self._person, 10)
         self.create_subscription(Odometry, '/odom', self._odom, 20)
-        self.goal_pub = self.create_publisher(
-            PoseStamped, self.p['goal_update_topic'], 10)
-        self.navigator = ActionClient(self, NavigateToPose,
-                                      'navigate_to_pose')
-        self.create_timer(self.p['update_period_s'], self._tick)
+        self.command_pub = self.create_publisher(
+            Twist, self.p['command_topic'], 10)
+        self.create_timer(1.0 / self.p['control_rate_hz'], self._tick)
         self.get_logger().info(
-            f"person_follower up: standoff via BT truncate, "
-            f"lost timeout {self.p['lost_timeout_s']} s")
+            'person_follower v2 (direct pursuit): desired distance '
+            f"{self.p['desired_distance_m']} m, reacting at "
+            f"{self.p['control_rate_hz']:.0f} Hz through the normal "
+            'safety chain')
 
     def _person(self, msg):
         self.person = msg
         self.person_stamp = self.get_clock().now()
 
     def _odom(self, msg):
-        self.robot = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+        self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
+                     yaw_from_quaternion(msg.pose.pose.orientation))
 
-    def _goal_pose(self):
-        """Free-space goal standoff_m short of the person, facing them.
-        None when the person is already within the standoff."""
-        if self.robot is None:
-            return None
-        px = self.person.pose.position.x
-        py = self.person.pose.position.y
-        dx, dy = px - self.robot[0], py - self.robot[1]
-        distance = math.hypot(dx, dy)
-        if distance < self.p['standoff_m'] + 0.15:
-            return None
-        scale = (distance - self.p['standoff_m']) / distance
-        pose = PoseStamped()
-        pose.header.frame_id = 'odom'
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = self.robot[0] + dx * scale
-        pose.pose.position.y = self.robot[1] + dy * scale
-        yaw = math.atan2(dy, dx)
-        (pose.pose.orientation.x, pose.pose.orientation.y,
-         pose.pose.orientation.z, pose.pose.orientation.w) = (
-            yaw_to_quaternion(yaw))
-        return pose
+    def _stop(self):
+        if self.was_commanding:
+            self.command_pub.publish(Twist())
+            self.was_commanding = False
+            self.get_logger().info('holding (person lost or at distance)')
 
     def _tick(self):
         now = self.get_clock().now()
         fresh = (self.person_stamp is not None and
                  (now - self.person_stamp).nanoseconds / 1e9
                  < self.p['lost_timeout_s'])
-        active = self.goal_handle is not None or self.goal_pending
-        if not fresh:
-            if self.goal_handle is not None:
-                self.get_logger().info('person lost -> stopping follow')
-                self.goal_handle.cancel_goal_async()
-                self.goal_handle = None
+        if not fresh or self.pose is None:
+            self._stop()
             return
-        if self.robot is not None:
-            distance = math.hypot(
-                self.person.pose.position.x - self.robot[0],
-                self.person.pose.position.y - self.robot[1])
-            if not active and distance < self.p['engage_min_distance_m']:
-                return                       # already at standoff; wait
-        goal = self._goal_pose()
-        if goal is None:
-            return          # inside standoff: let the running goal finish
-        if not active:
-            if (self.retry_after is None
-                    or now >= self.retry_after):
-                self._engage(goal)
+        dx = self.person.pose.position.x - self.pose[0]
+        dy = self.person.pose.position.y - self.pose[1]
+        distance = math.hypot(dx, dy)
+        error = distance - self.p['desired_distance_m']
+        if error < self.p['arrive_tolerance_m']:
+            self._stop()
+            return
+        bearing = wrap(math.atan2(dy, dx) - self.pose[2])
+        # Pure pursuit on the person: arc whose chord ends at them.
+        curvature = 2.0 * math.sin(bearing) / max(distance, 0.3)
+        curvature = max(-self.p['max_curvature_1pm'],
+                        min(self.p['max_curvature_1pm'], curvature))
+        if abs(bearing) > self.p['hard_turn_bearing_rad']:
+            speed = self.p['crawl_speed_mps']
+            curvature = math.copysign(self.p['max_curvature_1pm'], bearing)
         else:
-            self.goal_pub.publish(goal)
-
-    def _engage(self, pose):
-        if not self.navigator.server_is_ready():
-            self.get_logger().warning('navigate_to_pose not ready',
-                                      throttle_duration_sec=5.0)
-            return
-        goal = NavigateToPose.Goal()
-        goal.pose = pose
-        goal.behavior_tree = os.path.expanduser(self.p['follow_bt_xml'])
-        self.goal_pending = True
-        self.get_logger().info('engaging: following person')
-        future = self.navigator.send_goal_async(goal)
-        future.add_done_callback(self._goal_response)
-
-    def _goal_response(self, future):
-        self.goal_pending = False
-        handle = future.result()
-        if handle is None or not handle.accepted:
-            self.get_logger().warning('follow goal rejected')
-            return
-        self.goal_handle = handle
-        handle.get_result_async().add_done_callback(self._result)
-
-    def _result(self, future):
-        try:
-            status = future.result().status
-        except Exception:
-            status = GoalStatus.STATUS_UNKNOWN
-        self.goal_handle = None
-        if status == GoalStatus.STATUS_ABORTED:
-            self.retry_after = self.get_clock().now() + rclpy.duration.Duration(
-                seconds=self.p['retry_backoff_s'])
-            self.get_logger().warning(
-                'follow aborted; backing off '
-                f"{self.p['retry_backoff_s']} s before re-engaging")
+            speed = min(self.p['max_speed_mps'],
+                        self.p['speed_gain'] * error)
+            # Slow down while pointing away; full speed when aligned.
+            speed *= max(0.3, math.cos(bearing))
+        command = Twist()
+        command.linear.x = float(max(0.0, speed))
+        command.angular.z = float(command.linear.x * curvature)
+        self.command_pub.publish(command)
+        self.was_commanding = True
 
 
 def main(args=None):
@@ -174,16 +136,12 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # Ctrl-C safety: an active NavigateToPose goal belongs to
-        # bt_navigator and would keep DRIVING after this process dies.
-        # Best-effort cancel before shutdown.
-        if node.goal_handle is not None:
-            node.get_logger().info('shutdown: canceling active follow goal')
-            future = node.goal_handle.cancel_goal_async()
-            for _ in range(20):
-                rclpy.spin_once(node, timeout_sec=0.1)
-                if future.done():
-                    break
+        # Leave a zero command; the adaptive controller's command watchdog
+        # holds neutral once we stop publishing.
+        try:
+            node.command_pub.publish(Twist())
+        except Exception:
+            pass
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

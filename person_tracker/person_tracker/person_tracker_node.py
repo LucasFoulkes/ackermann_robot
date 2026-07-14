@@ -57,6 +57,7 @@ class Track:
         self.last_update = stamp
         self.born = stamp
         self.origin = np.array([x, y])
+        self.last_moving = stamp
         self.travel = 0.0        # max NET displacement from birth position:
         self.confirmed = False   # summed increments would accumulate jitter
         self.missed = 0          # (~0.2 m/s of phantom travel at 10 Hz)
@@ -89,6 +90,8 @@ class Track:
         self.cov = (np.eye(4) - k @ h) @ self.cov
         self.travel = max(self.travel, float(
             np.linalg.norm(self.state[:2] - self.origin)))
+        if self.speed > 0.15:
+            self.last_moving = stamp
         self.last_update = stamp
         self.missed = 0
 
@@ -128,7 +131,9 @@ class PersonTracker(Node):
             self._lidar_extrinsic())
 
         self.pose = None                    # (x, y, yaw) odom frame
+        self.robot_speed = 0.0
         self.first_scan_stamp = None
+        self.last_scan_stamp = None
         self.cells = {}                     # cell -> [first_hit, last_hit,
                                             #          hits, frees, static]
         self.tracks = []
@@ -166,6 +171,7 @@ class PersonTracker(Node):
     def _odom(self, msg):
         self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
                      yaw_from_quaternion(msg.pose.pose.orientation))
+        self.robot_speed = abs(msg.twist.twist.linear.x)
 
     # ------------------------------------------------------------- scan --
     def _scan(self, msg):
@@ -174,6 +180,7 @@ class PersonTracker(Node):
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if self.first_scan_stamp is None:
             self.first_scan_stamp = stamp
+        self.last_scan_stamp = stamp
         self.scan_count += 1
         px, py, pyaw = self.pose
         syaw = pyaw + self.lidar_yaw
@@ -363,12 +370,14 @@ class PersonTracker(Node):
         warmed_up = (self.first_scan_stamp is not None and
                      stamp - self.first_scan_stamp
                      > self.p['background_promote_s'] + 2.0)
-        if warmed_up:
+        if warmed_up and self.robot_speed < 0.1:
+            # Creation is also gated on the ROBOT being still: un-deskewed
+            # scans smear static returns along the ego-motion, minting
+            # phantom 'moving' clusters (the ghost-follow bug). Existing
+            # tracks keep updating while driving; only births pause.
             for i in unclaimed:
                 # Furniture never steps into previously-free space: require
-                # dynamic-cell evidence to birth a track. (Cost: a person
-                # standing motionless since before boot is not tracked
-                # until their first step — the documented stage-1 gap.)
+                # dynamic-cell evidence to birth a track.
                 if candidates[i]['dynamic'] >= 0.3:
                     self.tracks.append(
                         Track(candidates[i]['x'], candidates[i]['y'],
@@ -386,7 +395,15 @@ class PersonTracker(Node):
         current = next((t for t in confirmed if t.id == self.followed_id),
                        None)
         if current is not None:
-            return current
+            stale = (self.last_scan_stamp is not None and
+                     self.last_scan_stamp - current.last_moving > 8.0)
+            movers = [t for t in confirmed
+                      if t.id != current.id and t.speed > 0.25]
+            if not (stale and movers):
+                return current
+            self.get_logger().info(
+                f'follow target {current.id} stationary >8 s while '
+                f'track {movers[0].id} is moving: switching')
         moving = [t for t in confirmed if t.speed > 0.15]
         pool = moving or confirmed
         if self.pose is None:
