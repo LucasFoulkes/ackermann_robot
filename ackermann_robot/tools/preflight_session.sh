@@ -4,6 +4,8 @@
 # wedged I2C, double stacks), then launches the armed stack and waits for
 # health. Prints READY on success; any failure prints a specific reason.
 # (no `set -u`: ROS setup.bash references unbound variables)
+FOLLOW=false
+if [ "$1" = "--follow" ]; then FOLLOW=true; shift; fi
 LOG="${1:-/tmp/bringup_$(date +%H%M%S).log}"
 
 echo "[preflight] stopping any existing stack..."
@@ -31,7 +33,7 @@ fi
 
 echo "[preflight] launching armed stack (log: $LOG)..."
 nohup ros2 launch ackermann_robot bringup.launch.py arm_hardware:=true \
-  > "$LOG" 2>&1 &
+  follow:=$FOLLOW > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
 echo "[preflight] waiting for health (odom + scan + nav server)..."

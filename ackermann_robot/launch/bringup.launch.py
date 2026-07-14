@@ -18,6 +18,7 @@ def generate_launch_description():
     serial_baudrate = LaunchConfiguration('serial_baudrate')
     arm_hardware = LaunchConfiguration('arm_hardware')
     record_bag = LaunchConfiguration('record_bag')
+    follow = LaunchConfiguration('follow')
 
     bag_directory = os.path.expanduser('~/.robot/bags')
     os.makedirs(bag_directory, exist_ok=True)
@@ -119,6 +120,15 @@ def generate_launch_description():
         }.items(),
     )
 
+    # follow:=true adds person detection + direct-pursuit following on
+    # top of the normal stack (one-command follow-me session).
+    person_tracker = Node(
+        package='person_tracker', executable='person_tracker',
+        output='screen', condition=IfCondition(follow))
+    person_follower = Node(
+        package='person_tracker', executable='person_follower',
+        output='screen', condition=IfCondition(follow))
+
     flight_recorder = ExecuteProcess(
         condition=IfCondition(record_bag),
         cmd=[
@@ -164,9 +174,17 @@ def generate_launch_description():
                 '~/.robot/bags (enabled by default).'
             ),
         ),
+        DeclareLaunchArgument(
+            'follow',
+            default_value='false',
+            description='Also start person_tracker + person_follower '
+                        '(follow-me mode).',
+        ),
         robot_state_publisher,
         lidar,
         mola_odometry,
         adaptive_navigation,
+        person_tracker,
+        person_follower,
         flight_recorder,
     ])

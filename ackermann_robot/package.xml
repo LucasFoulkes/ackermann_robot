@@ -23,6 +23,7 @@
   <exec_depend>adaptive_ackermann</exec_depend>
   <exec_depend>adaptive_ackermann_msgs</exec_depend>
   <exec_depend>pca9685_effort_driver</exec_depend>
+  <exec_depend>person_tracker</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>sllidar_ros2</exec_depend>
