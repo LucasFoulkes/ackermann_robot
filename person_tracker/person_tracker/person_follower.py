@@ -62,7 +62,10 @@ class PersonFollower(Node):
             # v = vmax / (1 + beta*|kappa|^lambda) — speed collapses as
             # curvature demand rises (graceful approach, no orbiting).
             'k2': 2.0,
-            'beta': 0.4,
+            # beta 0.4 allowed ~0.39 m/s at full lock; proven tight-curve
+            # tracking speed is ~0.17-0.20 (same regression as RPP's
+            # regulated radius). 1.5 gives ~0.20 at |kappa|=1.15.
+            'beta': 1.5,
             'lambda': 2.0,
             # Single bidirectional law: person in the front hemisphere ->
             # nose-first pursuit; rear hemisphere -> TAIL-FIRST pursuit
