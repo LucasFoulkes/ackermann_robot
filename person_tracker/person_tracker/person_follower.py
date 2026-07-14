@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""Follow the confirmed person — hybrid (v3).
+"""Follow the confirmed person (v5: forward-first, geometric trigger).
 
 Two modes, each using the subsystem proven at that job:
 
-CHASE (person inside the front cone): direct velocity streaming using the
+CHASE (person single-arc reachable): direct velocity streaming using the
 Park–Kuipers graceful-motion control law — the same law Nav2's Following/
 Docking servers use. Curvature from the egocentric polar error, speed
 automatically collapsing with curvature demand. Reaction latency is one
 10 Hz tick. Commands flow through the normal safety chain
 (/cmd_vel_nav_raw -> adaptive limits -> collision monitor).
 
-REORIENT (person far off-axis or behind): an Ackermann with a ~1.2 m
-turning radius cannot swing its nose in place — forward-only chasing
-orbits the room and hand-rolled K-turns are a poor rewrite of what Smac
-Reeds-Shepp already does well. So: stream stops, ONE NavigateToPose goal
-is sent to the standoff point (default compute-once BT, cusp dispatcher
-executes the multi-point turn exactly like a normal goal), and the moment
-the person is back in the front cone the goal is canceled and CHASE
-resumes. No goal updates mid-maneuver -> no replan churn.
+The mode trigger is GEOMETRIC, not a bearing heuristic: the closed-form
+Ackermann arc radius through the person's body-frame position (the PRM
+paper's edge test, a2=0 for our rear-axle frame). If ONE forward arc
+within the turning limit reaches them, pursue; otherwise run the REACTIVE
+3-POINT TURN — alternating full-lock forward/reverse arcs that rotate the
+nose toward the person while translations cancel (Reeds-Shepp cusp logic,
+executed reactively). Phases end on: person becomes arc-reachable, phase
+blocked (gate/no motion -> switch immediately; walls truncate phases so
+the maneuver squeezes into available space), or timeout. The person's
+live bearing steers every phase — nothing is ever frozen.
+
+Smac remains only for obstacle route-arounds (chase jammed) and
+search-at-last-seen. All commands flow through the normal safety chain.
 """
 
 import math
@@ -67,13 +72,17 @@ class PersonFollower(Node):
             # regulated radius). 1.5 gives ~0.20 at |kappa|=1.15.
             'beta': 1.5,
             'lambda': 2.0,
-            # Single bidirectional law: person in the front hemisphere ->
-            # nose-first pursuit; rear hemisphere -> TAIL-FIRST pursuit
-            # (back toward them like a car to a hitch). Hysteresis on the
-            # hemisphere choice only; no modes, no frozen maneuver goals.
-            'hemisphere_to_reverse_rad': 1.92,   # |bearing| beyond -> back up
-            'hemisphere_to_forward_rad': 1.45,   # |bearing| within -> nose-first
-            'max_reverse_speed_mps': 0.45,
+            # Geometric mode trigger: minimum radius of a single forward
+            # arc that counts as 'reachable' (chassis limit ~0.87 m at
+            # kappa 1.15; margin keeps the boundary honest). Exit the
+            # 3-point turn only when reachable with extra margin
+            # (hysteresis so the boundary cannot dither).
+            'min_turn_radius_m': 0.90,
+            'reach_exit_margin': 1.15,
+            # Reactive 3-point turn: full-lock alternating arcs.
+            'kturn_crawl_mps': 0.18,
+            'kturn_phase_max_s': 2.5,
+            'kturn_blocked_after_s': 1.2,
             'reorient_timeout_s': 25.0,
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
@@ -99,7 +108,9 @@ class PersonFollower(Node):
         self.pose = None
         self.robot_speed = 0.0
         self.mode = 'chase'
-        self.drive_direction = 1          # +1 nose-first, -1 tail-first
+        self.kturn_phase = None           # None | 'fwd' | 'rev'
+        self.kturn_phase_until = 0.0
+        self.kturn_blocked_since = None
         self.band = 'hold'
         self.was_commanding = False
         self.stalled_since = None
@@ -119,8 +130,8 @@ class PersonFollower(Node):
                                       'navigate_to_pose')
         self.create_timer(1.0 / self.p['control_rate_hz'], self._tick)
         self.get_logger().info(
-            'person_follower v3 (hybrid): graceful-law chase in the front '
-            'cone, one-shot Smac maneuver to reorient')
+            'person_follower v5: graceful chase when single-arc reachable, '
+            'reactive 3-point turn otherwise')
 
     # ------------------------------------------------------------ inputs --
     def _person(self, msg):
@@ -230,44 +241,77 @@ class PersonFollower(Node):
         if self.escape_until is not None:
             if seconds < self.escape_until:
                 command = Twist()
-                command.linear.x = (-self.drive_direction
-                                    * self.p['escape_speed_mps'])
+                command.linear.x = -self.p['escape_speed_mps']
                 self.command_pub.publish(command)
                 self.was_commanding = True
                 return
             self.escape_until = None
             self.stalled_since = None
-        # Hemisphere with hysteresis: nose-first vs tail-first.
-        if self.drive_direction > 0:
-            if abs(bearing) > self.p['hemisphere_to_reverse_rad']:
-                self.drive_direction = -1
-                self.get_logger().info('person behind: following tail-first')
+        # Geometric reachability: the unique Ackermann arc through the
+        # person's body-frame position (PRM-paper edge test, a2=0 for our
+        # rear-axle frame). Reachable = ahead AND radius >= chassis limit.
+        yaw = self.pose[2]
+        xb = math.cos(yaw) * dx + math.sin(yaw) * dy
+        yb = -math.sin(yaw) * dx + math.cos(yaw) * dy
+        if abs(yb) < 1e-3:
+            arc_radius = math.inf
         else:
-            if abs(bearing) < self.p['hemisphere_to_forward_rad']:
-                self.drive_direction = 1
-                self.get_logger().info('person ahead: following nose-first')
-        # Park-Kuipers graceful law (theta=0), applied to whichever end
-        # leads: tail-first uses the person's bearing FROM THE TAIL and the
-        # mirrored curvature sign (omega = v * kappa with v < 0).
-        if self.drive_direction > 0:
-            effective_bearing = bearing
-        else:
-            effective_bearing = wrap(bearing - math.pi)
-        curvature = (self.p['k2'] * effective_bearing
-                     + math.sin(effective_bearing)) / max(distance, 0.3)
-        if self.drive_direction < 0:
-            curvature = -curvature
+            arc_radius = (xb * xb + yb * yb) / (2.0 * abs(yb))
+        reachable = xb > 0.05 and arc_radius >= self.p['min_turn_radius_m']
+        comfortably = (xb > 0.05 and arc_radius >= self.p['min_turn_radius_m']
+                       * self.p['reach_exit_margin'])
+        if self.kturn_phase is None and not reachable:
+            self.kturn_phase = 'rev' if xb < 0 else 'fwd'
+            self.kturn_phase_until = seconds + self.p['kturn_phase_max_s']
+            self.kturn_blocked_since = None
+            self.get_logger().info(
+                f'not arc-reachable (R={arc_radius:.2f} m, x={xb:+.2f}): '
+                'reactive 3-point turn')
+        elif self.kturn_phase is not None and comfortably:
+            self.kturn_phase = None
+            self.get_logger().info('arc-reachable: resuming pursuit')
+        if self.kturn_phase is not None:
+            # Blocked phase (gate hold / wall) -> switch direction NOW:
+            # walls truncate phases, the turn squeezes into available room.
+            blocked = False
+            if self.robot_speed < 0.03:
+                if self.kturn_blocked_since is None:
+                    self.kturn_blocked_since = seconds
+                elif (seconds - self.kturn_blocked_since
+                        > self.p['kturn_blocked_after_s']):
+                    blocked = True
+            else:
+                self.kturn_blocked_since = None
+            if blocked or seconds >= self.kturn_phase_until:
+                self.kturn_phase = ('rev' if self.kturn_phase == 'fwd'
+                                    else 'fwd')
+                self.kturn_phase_until = seconds + self.p['kturn_phase_max_s']
+                self.kturn_blocked_since = None
+            side = 1.0 if bearing > 0 else -1.0
+            command = Twist()
+            if self.kturn_phase == 'fwd':
+                command.linear.x = self.p['kturn_crawl_mps']
+                kappa = side * self.p['max_curvature_1pm']
+            else:
+                command.linear.x = -self.p['kturn_crawl_mps']
+                kappa = -side * self.p['max_curvature_1pm']
+            command.angular.z = command.linear.x * kappa
+            self.command_pub.publish(command)
+            self.was_commanding = True
+            self.stalled_since = None
+            return
+        # Park-Kuipers graceful law (theta=0: no final-heading constraint).
+        curvature = (self.p['k2'] * bearing + math.sin(bearing)) \
+            / max(distance, 0.3)
         curvature = max(-self.p['max_curvature_1pm'],
                         min(self.p['max_curvature_1pm'], curvature))
-        top = (self.p['max_speed_mps'] if self.drive_direction > 0
-               else self.p['max_reverse_speed_mps'])
-        speed = top / (
+        speed = self.p['max_speed_mps'] / (
             1.0 + self.p['beta'] * abs(curvature) ** self.p['lambda'])
         # Speed matching: move at the person's pace plus a catch-up term.
         speed = min(speed,
                     self.person_speed + self.p['speed_gain'] * error)
         command = Twist()
-        command.linear.x = float(self.drive_direction * max(0.0, speed))
+        command.linear.x = float(max(0.0, speed))
         command.angular.z = float(command.linear.x * curvature)
         self.command_pub.publish(command)
         self.was_commanding = True
