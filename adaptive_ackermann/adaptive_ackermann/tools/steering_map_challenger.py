@@ -32,7 +32,10 @@ REV_DISTANCE_LAG_M = 0.033
 SPEED_FLOOR_MPS = 0.10
 SETTLE_TOL_1PM = 0.10          # command must be settled across the lag window
 KNOT_SPACING_EFFORT = 0.06
-MIN_BIN_N = 4                  # bins thinner than this lean on the prior
+MIN_BIN_N = 25                 # bins thinner than this lean on the prior
+# (4 accepted transient-contaminated reverse bins on 2026-07-14: the
+# refit map said zero-steering = -0.11 1/m and reverse wrong-sign
+# tracking jumped 5% -> 17%. Maneuver legs are ALL transient.)
 
 # Generic cautious prior: +-18 deg wheel angle at +-0.86 effort (the old
 # +-430 us over a ~500 us half-span), centered on the declared neutral.

@@ -125,7 +125,7 @@ class AdaptiveAckermannController(Node):
             # that measurement was at |k| <= 0.8). Scale launch efforts by
             # (1 + boost * |curvature|); drop-on-raw-evidence still bounds
             # any overshoot.
-            'launch_curvature_boost': 0.2,
+            'launch_curvature_boost': 0.15,
             # Set the wheels BEFORE moving: a 3-point-turn leg that launches
             # mid-servo-traverse drives its first half-meter nearly straight
             # (observed 2026-07-14). Startup holds neutral until steering is
@@ -1741,9 +1741,12 @@ class AdaptiveAckermannController(Node):
                                self._throttle_slope(direction, abs(target)))
                     curve_boost = (1.0 + self.p['launch_curvature_boost']
                                    * abs(curvature))
-                    drop_pulse = (base + self.trim[trim_key] + (
-                        drop_effort if sign > 0 else -drop_effort)) \
-                        * curve_boost
+                    # Boost ONLY the breakaway push. Scaling the post-
+                    # breakaway landing level too made every high-curvature
+                    # REVERSE launch land 30% hot (median 0.49 m/s peaks,
+                    # worst 0.84 — the backward lunges, 2026-07-14 01:0x).
+                    drop_pulse = base + self.trim[trim_key] + (
+                        drop_effort if sign > 0 else -drop_effort)
                     if self.state == 'startup':
                         learned = (self.breakaway_models[direction]['effort']
                                    * curve_boost)
