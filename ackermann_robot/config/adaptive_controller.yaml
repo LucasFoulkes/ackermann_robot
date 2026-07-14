@@ -143,7 +143,10 @@ adaptive_ackermann_controller:
     # Rollback threshold calibrated from the 2026-07-12 drill: 0.65 catches
     # gross failures without false trips; finer regressions are the
     # between-session scorecard's job.
-    learned_steering_rollback_error_1pm: 0.65
+    learned_steering_rollback_error_1pm: 0.85  # recalibrated 2026-07-14 for
+    # the 0.6-era: known-good driving (all-maneuvers-passing session) now
+    # reads applied EMA median 0.28 / max 0.64 vs the 0.3-era 0.17/0.54
+    # this threshold was drilled on; genuine map failure still reads 1.0+.
     # Stage C applied 2026-07-13: learned first-order dynamics drive the
     # preview horizon. Set to 'shadow' to fall back.
     learned_dynamics_mode: applied
