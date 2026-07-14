@@ -119,6 +119,13 @@ class AdaptiveAckermannController(Node):
             'effort_scale_process_per_s': 0.0005,
             'effort_scale_boot_sd': 0.10,
             'startup_drop_through_mps': 0.15,
+            # Steering drag raises breakaway when launching INTO a turn
+            # (2026-07-14 follow sessions: 24-37% of curve-commanded time
+            # spent stalled; the throttle model is 1-D by measurement, but
+            # that measurement was at |k| <= 0.8). Scale launch efforts by
+            # (1 + boost * |curvature|); drop-on-raw-evidence still bounds
+            # any overshoot.
+            'launch_curvature_boost': 0.2,
             # The ESC cannot roll continuously at arbitrarily low speed. For
             # gentle requests and short committed segments, pre-steer, apply a
             # bounded learned breakaway pulse, then coast before re-arming.
@@ -1719,10 +1726,14 @@ class AdaptiveAckermannController(Node):
                     # reverse stalls in the 15:27 drive.
                     drop_effort = (self.p['startup_drop_through_mps'] *
                                self._throttle_slope(direction, abs(target)))
-                    drop_pulse = base + self.trim[trim_key] + (
-                        drop_effort if sign > 0 else -drop_effort)
+                    curve_boost = (1.0 + self.p['launch_curvature_boost']
+                                   * abs(curvature))
+                    drop_pulse = (base + self.trim[trim_key] + (
+                        drop_effort if sign > 0 else -drop_effort)) \
+                        * curve_boost
                     if self.state == 'startup':
-                        learned = self.breakaway_models[direction]['effort']
+                        learned = (self.breakaway_models[direction]['effort']
+                                   * curve_boost)
                         if (self.session_launches[direction] <
                                 self.p['session_warmup_launches']):
                             # Re-feel the pedal: approach the remembered

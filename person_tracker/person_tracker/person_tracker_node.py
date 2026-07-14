@@ -373,6 +373,18 @@ class PersonTracker(Node):
                     stamp - track.last_update >= self.p['track_timeout_s']):
                 self.recent_deaths.append(
                     (float(track.state[0]), float(track.state[1]), stamp))
+                # Purge the grid around the death: a person who stood still
+                # long enough for their track to die has been absorbed into
+                # the static background — which then classifies their next
+                # step as furniture and blinds re-detection (observed as
+                # 40 s of 'holding: no confirmed person' on 2026-07-14).
+                cx, cy = float(track.state[0]), float(track.state[1])
+                cell_m = self.p['cell_m']
+                reach = int(0.6 / cell_m)
+                base = self._cell(cx, cy)
+                for ix in range(base[0] - reach, base[0] + reach + 1):
+                    for iy in range(base[1] - reach, base[1] + reach + 1):
+                        self.cells.pop((ix, iy), None)
         self.recent_deaths = [d for d in self.recent_deaths
                               if stamp - d[2] < 6.0]
         self.tracks = [t for t in self.tracks
@@ -391,16 +403,21 @@ class PersonTracker(Node):
             for i in unclaimed:
                 # Furniture never steps into previously-free space: require
                 # dynamic-cell evidence to birth a track.
-                if candidates[i]['dynamic'] >= 0.3:
+                near_death = any(
+                    math.hypot(candidates[i]['x'] - x,
+                               candidates[i]['y'] - y) < 0.7
+                    for x, y, _ in self.recent_deaths)
+                # Resurrection births skip the dynamic-evidence gate: the
+                # purged region reads 'unknown', which yields zero dynamic
+                # ratio even for a genuinely stepping person.
+                if candidates[i]['dynamic'] >= 0.3 or near_death:
                     track = Track(candidates[i]['x'], candidates[i]['y'],
                                   stamp)
                     # Resurrection: born where a confirmed person just died
                     # (they paused, their track timed out) -> confirm on a
                     # single step instead of a full 0.4 m re-walk. Fixes the
                     # robot going silent after the person stands a while.
-                    if any(math.hypot(track.state[0] - x,
-                                      track.state[1] - y) < 0.7
-                           for x, y, _ in self.recent_deaths):
+                    if near_death:
                         track.confirm_travel = 0.15
                     self.tracks.append(track)
 
