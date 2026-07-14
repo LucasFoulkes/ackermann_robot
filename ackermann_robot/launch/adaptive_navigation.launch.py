@@ -76,9 +76,13 @@ def generate_launch_description():
     planner_envelope = {
         'GridBased.minimum_turning_radius': planner_radius,
     }
-    controller_envelope = {
-        'FollowPath.regulated_linear_scaling_min_radius': planner_radius,
-    }
+    # NOTE: regulated_linear_scaling_min_radius deliberately NOT tied to
+    # the planner radius anymore. Coupling them meant 'can plan tighter'
+    # silently became 'corners faster': when the learned planning radius
+    # shrank 1.33 -> 0.85 m, tight-curve speeds doubled (0.17 -> 0.33 m/s
+    # median) and turning quality collapsed (2026-07-14). Cornering speed
+    # is a tracking-comfort limit and stays fixed in the yaml.
+    controller_envelope = {}
     # The per-vehicle facts file lives in the SOURCE tree (edited without
     # rebuilds), matching the long-standing controller default.
     birth_certificate = os.path.expanduser(
