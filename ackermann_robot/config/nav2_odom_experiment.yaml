@@ -21,7 +21,7 @@ planner_server:
       reverse_penalty: 1.2   # was 2.1: maneuvers should USE reverse
       change_penalty: 0.20
       non_straight_penalty: 1.20
-      cost_penalty: 2.0
+      cost_penalty: 2.8   # keep plans farther from obstacles
       retrospective_penalty: 0.015
 
 controller_server:
@@ -58,7 +58,8 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.60
       lookahead_dist: 0.35
-      min_lookahead_dist: 0.35
+      min_lookahead_dist: 0.22  # was 0.35: maneuver legs are short arcs;
+      # a long lookahead chords across them (straight start, late turn)
       max_lookahead_dist: 0.75
       lookahead_time: 1.5
       transform_tolerance: 0.2
@@ -203,8 +204,9 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Cost field surrounding the rectangular footprint. This does not
         # replace the rectangle with a circular footprint.
-        inflation_radius: 0.50
-        cost_scaling_factor: 4.0
+        inflation_radius: 0.55
+        cost_scaling_factor: 2.5  # was 4.0: slower decay = near-obstacle
+        # driving actually costs something, plans swing wider
       always_send_full_costmap: true
 
 global_costmap:
@@ -240,6 +242,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Must cover the rectangle's 0.444 m circumscribed radius so Smac can
         # use its optimized footprint collision checks.
-        inflation_radius: 0.50
-        cost_scaling_factor: 4.0
+        inflation_radius: 0.55
+        cost_scaling_factor: 2.5  # was 4.0: slower decay = near-obstacle
+        # driving actually costs something, plans swing wider
       always_send_full_costmap: true

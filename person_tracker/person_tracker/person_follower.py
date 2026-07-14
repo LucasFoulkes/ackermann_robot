@@ -48,6 +48,13 @@ class PersonFollower(Node):
             'command_topic': '/cmd_vel_nav_raw',
             'desired_distance_m': 0.5,
             'arrive_tolerance_m': 0.10,
+            # Distance band with hysteresis (no oscillating at boundaries):
+            # closer than band_inner -> retreat until band_retreat_stop;
+            # farther than band_outer -> chase back to desired; in between ->
+            # hold still.
+            'band_inner_m': 0.30,
+            'band_retreat_stop_m': 0.45,
+            'band_outer_m': 0.75,
             'max_speed_mps': 0.60,
             'speed_gain': 0.8,           # m/s per metre of distance error
             'max_curvature_1pm': 1.15,
@@ -86,6 +93,7 @@ class PersonFollower(Node):
         self.pose = None
         self.robot_speed = 0.0
         self.mode = 'chase'
+        self.band = 'hold'
         self.was_commanding = False
         self.stalled_since = None
         self.escape_until = None
@@ -183,18 +191,28 @@ class PersonFollower(Node):
                 self.mode = 'chase'      # aborted/finished; chase decides
             return                       # Nav2 owns the wheels right now
 
-        # ---------------------------------------------------------- chase --
-        if error < -self.p['arrive_tolerance_m']:
-            # Person inside the standoff: back straight away to restore
-            # personal space (rear obstacle gate still guards behind).
+        # ------------------------------------------------- distance band --
+        if distance < self.p['band_inner_m']:
+            self.band = 'retreat'
+        elif self.band == 'retreat':
+            if distance >= self.p['band_retreat_stop_m']:
+                self.band = 'hold'
+        elif self.band == 'chase':
+            if error < self.p['arrive_tolerance_m']:
+                self.band = 'hold'
+        if self.band == 'hold' and distance > self.p['band_outer_m']:
+            self.band = 'chase'
+        if self.band == 'retreat':
+            # Back straight off to the stop line (rear gate guards behind).
             command = Twist()
-            command.linear.x = float(max(-0.35,
-                                         self.p['speed_gain'] * error))
+            command.linear.x = float(max(
+                -0.35, self.p['speed_gain']
+                * (distance - self.p['band_retreat_stop_m'])))
             self.command_pub.publish(command)
             self.was_commanding = True
             self.stalled_since = None
             return
-        if error < self.p['arrive_tolerance_m']:
+        if self.band == 'hold':
             self._stop_stream()
             self.stalled_since = None
             return
@@ -235,22 +253,17 @@ class PersonFollower(Node):
                 self.stalled_since = seconds
             elif seconds - self.stalled_since > self.p['stall_escape_after_s']:
                 self.stalled_since = None
-                self.jam_count += 1
-                if self.jam_count >= 2:
-                    # Second jam in a row: pure pursuit clearly cannot get
-                    # there — hand the problem to Smac, which plans AROUND
-                    # the obstacle instead of bumping into its gate.
-                    self.jam_count = 0
-                    self.get_logger().info(
-                        'jammed twice: asking the planner to route around')
-                    self._stop_stream()
-                    self._start_maneuver(self.person.pose.pose.position.x,
-                                         self.person.pose.pose.position.y,
-                                         mode='reorient')
-                    return
-                self.escape_until = seconds + self.p['escape_duration_s']
+                # Pursuit is blocked: hand it to Smac IMMEDIATELY — the
+                # planner sees the costmap and routes around, while blind
+                # pursuit can only bump the obstacle gate (looked like
+                # 'avoidance not working' in live testing).
                 self.get_logger().info(
-                    'front jammed: reversing to open space, then retrying')
+                    'chase blocked: asking the planner to route around')
+                self._stop_stream()
+                self._start_maneuver(self.person.pose.pose.position.x,
+                                     self.person.pose.pose.position.y,
+                                     mode='reorient')
+                return
         else:
             self.stalled_since = None
             if self.robot_speed > 0.25:

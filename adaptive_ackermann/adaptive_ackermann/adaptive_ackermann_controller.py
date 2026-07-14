@@ -126,6 +126,11 @@ class AdaptiveAckermannController(Node):
             # (1 + boost * |curvature|); drop-on-raw-evidence still bounds
             # any overshoot.
             'launch_curvature_boost': 0.2,
+            # Set the wheels BEFORE moving: a 3-point-turn leg that launches
+            # mid-servo-traverse drives its first half-meter nearly straight
+            # (observed 2026-07-14). Startup holds neutral until steering is
+            # within this effort error of its target.
+            'launch_presteer_ready_effort': 0.12,
             # The ESC cannot roll continuously at arbitrarily low speed. For
             # gentle requests and short committed segments, pre-steer, apply a
             # bounded learned breakaway pulse, then coast before re-arming.
@@ -1680,7 +1685,15 @@ class AdaptiveAckermannController(Node):
                                 % int(self.throttle_polarity))
                 if raw_motion:
                     self.wrong_direction_launches = 0
-                if (self.gentle_motion and
+                if (self.state == 'startup' and not raw_motion
+                        and directional_speed
+                        < self.p['breakaway_threshold_mps']
+                        and steering_error
+                        > self.p['launch_presteer_ready_effort']):
+                    # Wheels first, motion second.
+                    target_throttle = 0.0
+                    self.throttle_antiwindup_state = 'launch_presteer'
+                elif (self.gentle_motion and
                         steering_error >
                         self.p['gentle_steering_ready_effort']):
                     # Steering first: a low-speed correction should not spend
