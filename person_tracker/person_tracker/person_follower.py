@@ -42,7 +42,7 @@ class PersonFollower(Node):
             # robot->person line: the person's own legs are lethal obstacles
             # in the costmap, so a goal ON them can never be planned to
             # (Smac burned its whole iteration budget trying).
-            'standoff_m': 0.9,
+            'standoff_m': 0.5,
             # Person closer than this: do not chase, just hold position.
             'engage_min_distance_m': 1.4,
             # After an aborted follow, wait this long before re-engaging so
