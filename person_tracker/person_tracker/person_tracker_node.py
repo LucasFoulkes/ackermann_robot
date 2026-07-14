@@ -32,7 +32,7 @@ import os
 import numpy as np
 import rclpy
 import yaml
-from geometry_msgs.msg import Pose, PoseArray
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -142,6 +142,10 @@ class PersonTracker(Node):
             MarkerArray, '/person_tracker/markers', 5)
         self.people_pub = self.create_publisher(
             PoseArray, '/person_tracker/people', 5)
+        # Best single person for the follower: CONFIRMED tracks only
+        # (never chase an unconfirmed candidate), nearest to the robot.
+        self.person_pub = self.create_publisher(
+            PoseStamped, '/person_tracker/person', 5)
         self.get_logger().info('person_tracker up (stage 1: legs + motion '
                                'confirmation, odom frame)')
 
@@ -430,6 +434,17 @@ class PersonTracker(Node):
                 markers.markers.append(dot)
         self.marker_pub.publish(markers)
         self.people_pub.publish(people)
+        confirmed = [t for t in self.tracks if t.confirmed]
+        if confirmed and self.pose is not None:
+            best = min(confirmed, key=lambda t: math.hypot(
+                t.state[0] - self.pose[0], t.state[1] - self.pose[1]))
+            person = PoseStamped()
+            person.header.frame_id = 'odom'
+            person.header.stamp = stamp
+            person.pose.position.x = float(best.state[0])
+            person.pose.position.y = float(best.state[1])
+            person.pose.orientation.w = 1.0
+            self.person_pub.publish(person)
 
 
 def main(args=None):

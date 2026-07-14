@@ -20,6 +20,7 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
 from nav2_msgs.msg import SpeedLimit
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import LaserScan
@@ -273,6 +274,12 @@ class AdaptiveAckermannController(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {name: self.get_parameter(name).value for name in defaults}
+        # Live-tunable speed envelope (ros2 param set, no restart): the
+        # 1 Hz /speed_limit publication propagates the change to Nav2.
+        self.dynamic_parameters = {
+            'navigation_speed_limit_mps', 'maximum_forward_speed_mps',
+            'maximum_reverse_speed_mps', 'maximum_measured_speed_mps'}
+        self.add_on_set_parameters_callback(self._on_parameters)
         self._apply_birth_certificate()
         self.throttle_maps = {d: pairs(self.p[f'{d}_throttle_map'])
                               for d in ('forward', 'reverse')}
@@ -493,6 +500,28 @@ class AdaptiveAckermannController(Node):
         self.create_timer(1. / self.p['control_rate_hz'], self._tick)
         self.create_timer(1.0, self._publish_status)
         self.get_logger().info(f'Drive flight recorder: {self.drive_log_path}')
+
+    def _on_parameters(self, parameters):
+        applied = []
+        for parameter in parameters:
+            if parameter.name not in self.dynamic_parameters:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f'{parameter.name} is not live-tunable; '
+                           'edit config and restart')
+            self.p[parameter.name] = float(parameter.value)
+            applied.append(f'{parameter.name}={parameter.value}')
+        if applied and hasattr(self, 'limit_pub'):
+            self.get_logger().info('live speed update: ' + ', '.join(applied))
+            self.limit_pub.publish(String(data=json.dumps({
+                'max_forward_mps': self.p['maximum_forward_speed_mps'],
+                'max_reverse_mps': self.p['maximum_reverse_speed_mps'],
+                'navigation_speed_limit_mps':
+                    self.p['navigation_speed_limit_mps'],
+                'max_curvature_1pm': self.p['maximum_curvature_1pm'],
+                'minimum_turning_radius_m':
+                    1. / self.p['maximum_curvature_1pm']})))
+        return SetParametersResult(successful=True)
 
     def _load_runtime(self):
         try:
