@@ -174,6 +174,16 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        # Ctrl-C safety: an active NavigateToPose goal belongs to
+        # bt_navigator and would keep DRIVING after this process dies.
+        # Best-effort cancel before shutdown.
+        if node.goal_handle is not None:
+            node.get_logger().info('shutdown: canceling active follow goal')
+            future = node.goal_handle.cancel_goal_async()
+            for _ in range(20):
+                rclpy.spin_once(node, timeout_sec=0.1)
+                if future.done():
+                    break
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
