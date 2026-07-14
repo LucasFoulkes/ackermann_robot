@@ -134,9 +134,11 @@ adaptive_ackermann_controller:
     # inside |kappa| <= 0.6; dense map outside the region and as automatic
     # rollback champion.
     learned_steering_mode: blend
-    # Promoted 2026-07-14 (was 0.6): apply the learned map across the
-    # evidence-backed span up to +-0.9 1/m; rollback monitor guards.
-    learned_steering_trust_kappa_1pm: 0.9
+    # 0.9 promotion REVERTED: it pushed the map into its prior-filler
+    # region, the rollback tripped in minutes and benched the learned map
+    # for 71k ticks (whole session steering on the fallback). 0.6 is the
+    # certified data-backed span of the proven map.
+    learned_steering_trust_kappa_1pm: 0.6
     # Rollback threshold calibrated from the 2026-07-12 drill: 0.65 catches
     # gross failures without false trips; finer regressions are the
     # between-session scorecard's job.
