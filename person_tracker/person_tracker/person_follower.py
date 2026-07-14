@@ -64,10 +64,13 @@ class PersonFollower(Node):
             'k2': 2.0,
             'beta': 0.4,
             'lambda': 2.0,
-            # Person beyond this bearing: hand the turn-around to Smac.
-            'reorient_enter_bearing_rad': 0.9,
-            # ...and back in this cone: cancel the maneuver, resume chase.
-            'reorient_done_bearing_rad': 0.4,
+            # Single bidirectional law: person in the front hemisphere ->
+            # nose-first pursuit; rear hemisphere -> TAIL-FIRST pursuit
+            # (back toward them like a car to a hitch). Hysteresis on the
+            # hemisphere choice only; no modes, no frozen maneuver goals.
+            'hemisphere_to_reverse_rad': 1.92,   # |bearing| beyond -> back up
+            'hemisphere_to_forward_rad': 1.45,   # |bearing| within -> nose-first
+            'max_reverse_speed_mps': 0.45,
             'reorient_timeout_s': 25.0,
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
@@ -93,6 +96,7 @@ class PersonFollower(Node):
         self.pose = None
         self.robot_speed = 0.0
         self.mode = 'chase'
+        self.drive_direction = 1          # +1 nose-first, -1 tail-first
         self.band = 'hold'
         self.was_commanding = False
         self.stalled_since = None
@@ -152,7 +156,7 @@ class PersonFollower(Node):
                  < self.p['lost_timeout_s'])
         if not fresh or self.pose is None:
             self._stop_stream()
-            if self.mode == 'reorient':
+            if self.mode == 'avoid':
                 self._cancel_maneuver('person lost')
             if self.mode == 'search':
                 return                   # keep driving to the last sighting
@@ -193,17 +197,6 @@ class PersonFollower(Node):
                 self.mode = 'chase'
             else:
                 return
-        if self.mode == 'reorient':
-            if abs(bearing) < self.p['reorient_done_bearing_rad']:
-                self._cancel_maneuver('person back in front cone')
-            elif (self.reorient_started is not None and
-                    seconds - self.reorient_started
-                    > self.p['reorient_timeout_s']):
-                self._cancel_maneuver('maneuver timeout')
-            elif self.goal_handle is None and not self.goal_pending:
-                self.mode = 'chase'      # aborted/finished; chase decides
-            return                       # Nav2 owns the wheels right now
-
         # ------------------------------------------------- distance band --
         if distance < self.p['band_inner_m']:
             self.band = 'retreat'
@@ -216,11 +209,13 @@ class PersonFollower(Node):
         if self.band == 'hold' and distance > self.p['band_outer_m']:
             self.band = 'chase'
         if self.band == 'retreat':
-            # Back straight off to the stop line (rear gate guards behind).
+            # Straight away from the person, whichever end they crowd
+            # (front person -> back up; rear person -> pull forward).
             command = Twist()
-            command.linear.x = float(max(
-                -0.35, self.p['speed_gain']
-                * (distance - self.p['band_retreat_stop_m'])))
+            magnitude = min(0.35, self.p['speed_gain']
+                            * (self.p['band_retreat_stop_m'] - distance))
+            command.linear.x = float(
+                -magnitude if abs(bearing) < math.pi / 2 else magnitude)
             self.command_pub.publish(command)
             self.was_commanding = True
             self.stalled_since = None
@@ -229,39 +224,51 @@ class PersonFollower(Node):
             self._stop_stream()
             self.stalled_since = None
             return
-        if (abs(bearing) > self.p['reorient_enter_bearing_rad']
-                and (self.retry_after is None or now >= self.retry_after)):
-            self._stop_stream()
-            self._start_maneuver(self.person.pose.pose.position.x,
-                                 self.person.pose.pose.position.y,
-                                 mode='reorient')
-            return
         if self.escape_until is not None:
             if seconds < self.escape_until:
                 command = Twist()
-                command.linear.x = -self.p['escape_speed_mps']
+                command.linear.x = (-self.drive_direction
+                                    * self.p['escape_speed_mps'])
                 self.command_pub.publish(command)
                 self.was_commanding = True
                 return
             self.escape_until = None
             self.stalled_since = None
-        # Park-Kuipers graceful law (theta=0: no final-heading constraint).
-        curvature = (self.p['k2'] * bearing + math.sin(bearing)) \
-            / max(distance, 0.3)
+        # Hemisphere with hysteresis: nose-first vs tail-first.
+        if self.drive_direction > 0:
+            if abs(bearing) > self.p['hemisphere_to_reverse_rad']:
+                self.drive_direction = -1
+                self.get_logger().info('person behind: following tail-first')
+        else:
+            if abs(bearing) < self.p['hemisphere_to_forward_rad']:
+                self.drive_direction = 1
+                self.get_logger().info('person ahead: following nose-first')
+        # Park-Kuipers graceful law (theta=0), applied to whichever end
+        # leads: tail-first uses the person's bearing FROM THE TAIL and the
+        # mirrored curvature sign (omega = v * kappa with v < 0).
+        if self.drive_direction > 0:
+            effective_bearing = bearing
+        else:
+            effective_bearing = wrap(bearing - math.pi)
+        curvature = (self.p['k2'] * effective_bearing
+                     + math.sin(effective_bearing)) / max(distance, 0.3)
+        if self.drive_direction < 0:
+            curvature = -curvature
         curvature = max(-self.p['max_curvature_1pm'],
                         min(self.p['max_curvature_1pm'], curvature))
-        speed = self.p['max_speed_mps'] / (
+        top = (self.p['max_speed_mps'] if self.drive_direction > 0
+               else self.p['max_reverse_speed_mps'])
+        speed = top / (
             1.0 + self.p['beta'] * abs(curvature) ** self.p['lambda'])
-        # Speed matching: walk at the person's pace plus a catch-up term,
-        # inside the graceful-law curvature cap.
+        # Speed matching: move at the person's pace plus a catch-up term.
         speed = min(speed,
                     self.person_speed + self.p['speed_gain'] * error)
         command = Twist()
-        command.linear.x = float(max(0.0, speed))
+        command.linear.x = float(self.drive_direction * max(0.0, speed))
         command.angular.z = float(command.linear.x * curvature)
         self.command_pub.publish(command)
         self.was_commanding = True
-        if command.linear.x > 0.05 and self.robot_speed < 0.03:
+        if abs(command.linear.x) > 0.05 and self.robot_speed < 0.03:
             if self.stalled_since is None:
                 self.stalled_since = seconds
             elif seconds - self.stalled_since > self.p['stall_escape_after_s']:
@@ -338,7 +345,7 @@ class PersonFollower(Node):
                 self.search_done = True
                 self.get_logger().info(
                     'search finished; holding for the person')
-        if self.mode in ('reorient', 'search', 'avoid'):
+        if self.mode in ('search', 'avoid'):
             self.mode = 'chase'
 
 
