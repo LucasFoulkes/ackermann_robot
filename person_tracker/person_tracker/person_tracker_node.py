@@ -118,7 +118,7 @@ class PersonTracker(Node):
             'association_gate_m': 0.45,
             'min_travel_confirm_m': 0.40,
             'min_track_age_confirm_s': 1.0,
-            'track_timeout_s': 1.5,
+            'track_timeout_s': 2.5,   # coast through occlusions (velocity damps)
             'publish_debug_markers': True,
         }
         for key, value in defaults.items():
@@ -132,6 +132,7 @@ class PersonTracker(Node):
         self.cells = {}                     # cell -> [first_hit, last_hit,
                                             #          hits, frees, static]
         self.tracks = []
+        self.followed_id = None
         self.scan_count = 0
 
         qos = QoSProfile(depth=5)
@@ -373,6 +374,29 @@ class PersonTracker(Node):
                         Track(candidates[i]['x'], candidates[i]['y'],
                               stamp))
 
+    def _select_person(self):
+        """Sticky selection of the person to follow: keep the current
+        target while it lives (pausing must not cause a switch); when
+        choosing fresh, prefer a MOVING confirmed track over a stationary
+        one, nearest first."""
+        confirmed = [t for t in self.tracks if t.confirmed]
+        if not confirmed:
+            self.followed_id = None
+            return None
+        current = next((t for t in confirmed if t.id == self.followed_id),
+                       None)
+        if current is not None:
+            return current
+        moving = [t for t in confirmed if t.speed > 0.15]
+        pool = moving or confirmed
+        if self.pose is None:
+            best = pool[0]
+        else:
+            best = min(pool, key=lambda t: math.hypot(
+                t.state[0] - self.pose[0], t.state[1] - self.pose[1]))
+        self.followed_id = best.id
+        return best
+
     # ---------------------------------------------------------- publish --
     def _publish(self, stamp, legs, candidates):
         markers = MarkerArray()
@@ -384,6 +408,7 @@ class PersonTracker(Node):
         people = PoseArray()
         people.header.frame_id = 'odom'
         people.header.stamp = stamp
+        selected = self._select_person()
         for track in self.tracks:
             body = Marker()
             body.header.frame_id = 'odom'
@@ -396,9 +421,12 @@ class PersonTracker(Node):
             body.pose.position.z = 0.4
             body.scale.x = body.scale.y = 0.30
             body.scale.z = 0.8
-            body.color = (ColorRGBA(r=0.1, g=0.9, b=0.2, a=0.8)
-                          if track.confirmed else
-                          ColorRGBA(r=0.9, g=0.8, b=0.1, a=0.6))
+            if selected is not None and track.id == selected.id:
+                body.color = ColorRGBA(r=0.95, g=0.15, b=0.1, a=0.9)
+            elif track.confirmed:
+                body.color = ColorRGBA(r=0.1, g=0.9, b=0.2, a=0.8)
+            else:
+                body.color = ColorRGBA(r=0.9, g=0.8, b=0.1, a=0.6)
             markers.markers.append(body)
             label = Marker()
             label.header = body.header
@@ -410,7 +438,10 @@ class PersonTracker(Node):
             label.pose.position.z = 1.0
             label.scale.z = 0.15
             label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.9)
-            state = 'person' if track.confirmed else 'candidate'
+            if selected is not None and track.id == selected.id:
+                state = 'FOLLOWING'
+            else:
+                state = 'person' if track.confirmed else 'candidate'
             label.text = f'{state} {track.id} {track.speed:.2f} m/s'
             markers.markers.append(label)
             pose = Pose()
@@ -434,15 +465,12 @@ class PersonTracker(Node):
                 markers.markers.append(dot)
         self.marker_pub.publish(markers)
         self.people_pub.publish(people)
-        confirmed = [t for t in self.tracks if t.confirmed]
-        if confirmed and self.pose is not None:
-            best = min(confirmed, key=lambda t: math.hypot(
-                t.state[0] - self.pose[0], t.state[1] - self.pose[1]))
+        if selected is not None:
             person = PoseStamped()
             person.header.frame_id = 'odom'
             person.header.stamp = stamp
-            person.pose.position.x = float(best.state[0])
-            person.pose.position.y = float(best.state[1])
+            person.pose.position.x = float(selected.state[0])
+            person.pose.position.y = float(selected.state[1])
             person.pose.orientation.w = 1.0
             self.person_pub.publish(person)
 

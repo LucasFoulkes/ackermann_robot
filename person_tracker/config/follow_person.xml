@@ -2,18 +2,18 @@
   <BehaviorTree ID="MainTree">
     <!-- Dynamic person following (Nav2 dynamic-object-following pattern):
          GoalUpdater swaps in the freshest person pose from /goal_update,
-         the path is recomputed at 1 Hz, and TruncatePath removes the last
-         0.9 m so the robot holds a standoff instead of driving into the
-         person. FollowPath goes through the cusp dispatcher as usual.
+         the path is recomputed every ~3 s (1 Hz replanning canceled the cusp dispatcher segment before the robot could launch), and the standoff lives in the goal itself (the follower plants it
+         0.9 m short of the person, since legs are lethal in the costmap);
+         TruncatePath only trims the final approach. FollowPath goes through the cusp dispatcher as usual.
          Deliberately no recovery branch: if following fails the action
          aborts and the follower node decides whether to re-engage. -->
     <PipelineSequence name="FollowPerson">
-      <RateController hz="1.0">
+      <RateController hz="0.3">
         <Sequence>
           <GoalUpdater input_goal="{goal}" output_goal="{updated_goal}">
             <ComputePathToPose goal="{updated_goal}" path="{path}" planner_id="GridBased"/>
           </GoalUpdater>
-          <TruncatePath distance="0.9" input_path="{path}" output_path="{truncated_path}"/>
+          <TruncatePath distance="0.1" input_path="{path}" output_path="{truncated_path}"/>
         </Sequence>
       </RateController>
       <KeepRunningUntilFailure>

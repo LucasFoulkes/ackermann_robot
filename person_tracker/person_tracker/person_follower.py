@@ -38,8 +38,16 @@ class PersonFollower(Node):
             'goal_update_topic': '/goal_update',
             'lost_timeout_s': 3.0,
             'update_period_s': 0.5,
+            # Goal is planted this far SHORT of the person along the
+            # robot->person line: the person's own legs are lethal obstacles
+            # in the costmap, so a goal ON them can never be planned to
+            # (Smac burned its whole iteration budget trying).
+            'standoff_m': 0.9,
             # Person closer than this: do not chase, just hold position.
-            'engage_min_distance_m': 1.2,
+            'engage_min_distance_m': 1.4,
+            # After an aborted follow, wait this long before re-engaging so
+            # a persistent planning failure cannot loop at 2 Hz.
+            'retry_backoff_s': 2.5,
         }
         for key, value in defaults.items():
             self.declare_parameter(key, value)
@@ -50,6 +58,7 @@ class PersonFollower(Node):
         self.robot = None
         self.goal_handle = None
         self.goal_pending = False
+        self.retry_after = None
 
         self.create_subscription(PoseStamped, self.p['person_topic'],
                                  self._person, 10)
@@ -71,16 +80,23 @@ class PersonFollower(Node):
         self.robot = (msg.pose.pose.position.x, msg.pose.pose.position.y)
 
     def _goal_pose(self):
+        """Free-space goal standoff_m short of the person, facing them.
+        None when the person is already within the standoff."""
+        if self.robot is None:
+            return None
+        px = self.person.pose.position.x
+        py = self.person.pose.position.y
+        dx, dy = px - self.robot[0], py - self.robot[1]
+        distance = math.hypot(dx, dy)
+        if distance < self.p['standoff_m'] + 0.15:
+            return None
+        scale = (distance - self.p['standoff_m']) / distance
         pose = PoseStamped()
         pose.header.frame_id = 'odom'
         pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = self.person.pose.position.x
-        pose.pose.position.y = self.person.pose.position.y
-        if self.robot is not None:
-            yaw = math.atan2(pose.pose.position.y - self.robot[1],
-                             pose.pose.position.x - self.robot[0])
-        else:
-            yaw = 0.0
+        pose.pose.position.x = self.robot[0] + dx * scale
+        pose.pose.position.y = self.robot[1] + dy * scale
+        yaw = math.atan2(dy, dx)
         (pose.pose.orientation.x, pose.pose.orientation.y,
          pose.pose.orientation.z, pose.pose.orientation.w) = (
             yaw_to_quaternion(yaw))
@@ -104,18 +120,23 @@ class PersonFollower(Node):
                 self.person.pose.position.y - self.robot[1])
             if not active and distance < self.p['engage_min_distance_m']:
                 return                       # already at standoff; wait
+        goal = self._goal_pose()
+        if goal is None:
+            return          # inside standoff: let the running goal finish
         if not active:
-            self._engage()
+            if (self.retry_after is None
+                    or now >= self.retry_after):
+                self._engage(goal)
         else:
-            self.goal_pub.publish(self._goal_pose())
+            self.goal_pub.publish(goal)
 
-    def _engage(self):
+    def _engage(self, pose):
         if not self.navigator.server_is_ready():
             self.get_logger().warning('navigate_to_pose not ready',
                                       throttle_duration_sec=5.0)
             return
         goal = NavigateToPose.Goal()
-        goal.pose = self._goal_pose()
+        goal.pose = pose
         goal.behavior_tree = os.path.expanduser(self.p['follow_bt_xml'])
         self.goal_pending = True
         self.get_logger().info('engaging: following person')
@@ -138,8 +159,11 @@ class PersonFollower(Node):
             status = GoalStatus.STATUS_UNKNOWN
         self.goal_handle = None
         if status == GoalStatus.STATUS_ABORTED:
+            self.retry_after = self.get_clock().now() + rclpy.duration.Duration(
+                seconds=self.p['retry_backoff_s'])
             self.get_logger().warning(
-                'follow action aborted; will re-engage while person visible')
+                'follow aborted; backing off '
+                f"{self.p['retry_backoff_s']} s before re-engaging")
 
 
 def main(args=None):
