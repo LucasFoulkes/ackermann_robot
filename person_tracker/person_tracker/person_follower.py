@@ -26,7 +26,7 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry  # person topic carries velocity too
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
@@ -79,6 +79,7 @@ class PersonFollower(Node):
         self.p = {key: self.get_parameter(key).value for key in defaults}
 
         self.person = None
+        self.person_speed = 0.0
         self.person_stamp = None
         self.last_person_xy = None
         self.search_done = False
@@ -88,12 +89,13 @@ class PersonFollower(Node):
         self.was_commanding = False
         self.stalled_since = None
         self.escape_until = None
+        self.jam_count = 0
         self.goal_handle = None
         self.goal_pending = False
         self.reorient_started = None
         self.retry_after = None
 
-        self.create_subscription(PoseStamped, self.p['person_topic'],
+        self.create_subscription(Odometry, self.p['person_topic'],
                                  self._person, 10)
         self.create_subscription(Odometry, '/odom', self._odom, 20)
         self.command_pub = self.create_publisher(
@@ -108,8 +110,11 @@ class PersonFollower(Node):
     # ------------------------------------------------------------ inputs --
     def _person(self, msg):
         self.person = msg
+        self.person_speed = math.hypot(msg.twist.twist.linear.x,
+                                       msg.twist.twist.linear.y)
         self.person_stamp = self.get_clock().now()
-        self.last_person_xy = (msg.pose.position.x, msg.pose.position.y)
+        self.last_person_xy = (msg.pose.pose.position.x,
+                               msg.pose.pose.position.y)
         self.search_done = False
 
     def _odom(self, msg):
@@ -153,9 +158,13 @@ class PersonFollower(Node):
                     'person lost: searching at last seen position')
                 self._start_maneuver(self.last_person_xy[0],
                                      self.last_person_xy[1], mode='search')
+            else:
+                self.get_logger().info(
+                    'holding: no confirmed person (walk a step to '
+                    're-confirm)', throttle_duration_sec=10.0)
             return
-        dx = self.person.pose.position.x - self.pose[0]
-        dy = self.person.pose.position.y - self.pose[1]
+        dx = self.person.pose.pose.position.x - self.pose[0]
+        dy = self.person.pose.pose.position.y - self.pose[1]
         distance = math.hypot(dx, dy)
         error = distance - self.p['desired_distance_m']
         bearing = wrap(math.atan2(dy, dx) - self.pose[2])
@@ -175,6 +184,16 @@ class PersonFollower(Node):
             return                       # Nav2 owns the wheels right now
 
         # ---------------------------------------------------------- chase --
+        if error < -self.p['arrive_tolerance_m']:
+            # Person inside the standoff: back straight away to restore
+            # personal space (rear obstacle gate still guards behind).
+            command = Twist()
+            command.linear.x = float(max(-0.35,
+                                         self.p['speed_gain'] * error))
+            self.command_pub.publish(command)
+            self.was_commanding = True
+            self.stalled_since = None
+            return
         if error < self.p['arrive_tolerance_m']:
             self._stop_stream()
             self.stalled_since = None
@@ -182,8 +201,8 @@ class PersonFollower(Node):
         if (abs(bearing) > self.p['reorient_enter_bearing_rad']
                 and (self.retry_after is None or now >= self.retry_after)):
             self._stop_stream()
-            self._start_maneuver(self.person.pose.position.x,
-                                 self.person.pose.position.y,
+            self._start_maneuver(self.person.pose.pose.position.x,
+                                 self.person.pose.pose.position.y,
                                  mode='reorient')
             return
         if self.escape_until is not None:
@@ -202,7 +221,10 @@ class PersonFollower(Node):
                         min(self.p['max_curvature_1pm'], curvature))
         speed = self.p['max_speed_mps'] / (
             1.0 + self.p['beta'] * abs(curvature) ** self.p['lambda'])
-        speed = min(speed, self.p['speed_gain'] * error)
+        # Speed matching: walk at the person's pace plus a catch-up term,
+        # inside the graceful-law curvature cap.
+        speed = min(speed,
+                    self.person_speed + self.p['speed_gain'] * error)
         command = Twist()
         command.linear.x = float(max(0.0, speed))
         command.angular.z = float(command.linear.x * curvature)
@@ -212,11 +234,27 @@ class PersonFollower(Node):
             if self.stalled_since is None:
                 self.stalled_since = seconds
             elif seconds - self.stalled_since > self.p['stall_escape_after_s']:
+                self.stalled_since = None
+                self.jam_count += 1
+                if self.jam_count >= 2:
+                    # Second jam in a row: pure pursuit clearly cannot get
+                    # there — hand the problem to Smac, which plans AROUND
+                    # the obstacle instead of bumping into its gate.
+                    self.jam_count = 0
+                    self.get_logger().info(
+                        'jammed twice: asking the planner to route around')
+                    self._stop_stream()
+                    self._start_maneuver(self.person.pose.pose.position.x,
+                                         self.person.pose.pose.position.y,
+                                         mode='reorient')
+                    return
                 self.escape_until = seconds + self.p['escape_duration_s']
                 self.get_logger().info(
                     'front jammed: reversing to open space, then retrying')
         else:
             self.stalled_since = None
+            if self.robot_speed > 0.25:
+                self.jam_count = 0
 
     # ---------------------------------------------------------- maneuver --
     def _start_maneuver(self, target_x, target_y, mode):

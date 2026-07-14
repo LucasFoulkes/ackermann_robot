@@ -61,6 +61,7 @@ class Track:
         self.travel = 0.0        # max NET displacement from birth position:
         self.confirmed = False   # summed increments would accumulate jitter
         self.missed = 0          # (~0.2 m/s of phantom travel at 10 Hz)
+        self.confirm_travel = None   # None = use the global parameter
 
     def predict(self, dt):
         f = np.eye(4)
@@ -137,6 +138,7 @@ class PersonTracker(Node):
         self.cells = {}                     # cell -> [first_hit, last_hit,
                                             #          hits, frees, static]
         self.tracks = []
+        self.recent_deaths = []       # (x, y, stamp) of dead CONFIRMED tracks
         self.followed_id = None
         self.scan_count = 0
 
@@ -149,9 +151,10 @@ class PersonTracker(Node):
         self.people_pub = self.create_publisher(
             PoseArray, '/person_tracker/people', 5)
         # Best single person for the follower: CONFIRMED tracks only
-        # (never chase an unconfirmed candidate), nearest to the robot.
+        # (never chase an unconfirmed candidate). Odometry so the follower
+        # gets the Kalman velocity too (speed matching).
         self.person_pub = self.create_publisher(
-            PoseStamped, '/person_tracker/person', 5)
+            Odometry, '/person_tracker/person', 5)
         self.get_logger().info('person_tracker up (stage 1: legs + motion '
                                'confirmation, odom frame)')
 
@@ -352,7 +355,10 @@ class PersonTracker(Node):
                 unclaimed.remove(best)
                 track.update(candidates[best]['x'], candidates[best]['y'],
                              stamp)
-                if (track.travel >= self.p['min_travel_confirm_m']
+                needed = (track.confirm_travel
+                          if track.confirm_travel is not None
+                          else self.p['min_travel_confirm_m'])
+                if (track.travel >= needed
                         and stamp - track.born
                         >= self.p['min_track_age_confirm_s']):
                     if not track.confirmed:
@@ -362,6 +368,13 @@ class PersonTracker(Node):
                     track.confirmed = True
             else:
                 track.missed += 1
+        for track in self.tracks:
+            if (track.confirmed and
+                    stamp - track.last_update >= self.p['track_timeout_s']):
+                self.recent_deaths.append(
+                    (float(track.state[0]), float(track.state[1]), stamp))
+        self.recent_deaths = [d for d in self.recent_deaths
+                              if stamp - d[2] < 6.0]
         self.tracks = [t for t in self.tracks
                        if stamp - t.last_update < self.p['track_timeout_s']]
         # No new tracks until the background grid has matured: during
@@ -379,9 +392,17 @@ class PersonTracker(Node):
                 # Furniture never steps into previously-free space: require
                 # dynamic-cell evidence to birth a track.
                 if candidates[i]['dynamic'] >= 0.3:
-                    self.tracks.append(
-                        Track(candidates[i]['x'], candidates[i]['y'],
-                              stamp))
+                    track = Track(candidates[i]['x'], candidates[i]['y'],
+                                  stamp)
+                    # Resurrection: born where a confirmed person just died
+                    # (they paused, their track timed out) -> confirm on a
+                    # single step instead of a full 0.4 m re-walk. Fixes the
+                    # robot going silent after the person stands a while.
+                    if any(math.hypot(track.state[0] - x,
+                                      track.state[1] - y) < 0.7
+                           for x, y, _ in self.recent_deaths):
+                        track.confirm_travel = 0.15
+                    self.tracks.append(track)
 
     def _select_person(self):
         """Sticky selection of the person to follow: keep the current
@@ -483,12 +504,14 @@ class PersonTracker(Node):
         self.marker_pub.publish(markers)
         self.people_pub.publish(people)
         if selected is not None:
-            person = PoseStamped()
+            person = Odometry()
             person.header.frame_id = 'odom'
             person.header.stamp = stamp
-            person.pose.position.x = float(selected.state[0])
-            person.pose.position.y = float(selected.state[1])
-            person.pose.orientation.w = 1.0
+            person.pose.pose.position.x = float(selected.state[0])
+            person.pose.pose.position.y = float(selected.state[1])
+            person.pose.pose.orientation.w = 1.0
+            person.twist.twist.linear.x = float(selected.state[2])
+            person.twist.twist.linear.y = float(selected.state[3])
             self.person_pub.publish(person)
 
 

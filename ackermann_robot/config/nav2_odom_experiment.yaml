@@ -17,8 +17,8 @@ planner_server:
       analytic_expansion_max_length: 6.0
       # Bootstrap value for direct launches. adaptive_navigation.launch.py
       # replaces it with the persisted four-branch trackability estimate.
-      minimum_turning_radius: 1.30
-      reverse_penalty: 2.1
+      minimum_turning_radius: 0.90  # fallback; launch envelope overrides
+      reverse_penalty: 1.2   # was 2.1: maneuvers should USE reverse
       change_penalty: 0.20
       non_straight_penalty: 1.20
       cost_penalty: 2.0
