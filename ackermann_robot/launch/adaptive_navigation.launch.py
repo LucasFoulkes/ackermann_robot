@@ -109,7 +109,7 @@ def generate_launch_description():
              output='screen', parameters=[{
                  'frontend_action_name': 'follow_path',
                  'backend_action_name': 'follow_path_backend',
-                 'cusp_settle_time_s': 0.25,
+                 'cusp_settle_time_s': 0.40,
                  'cusp_goal_checker_id': 'cusp_goal_checker',
                  'minimum_executable_segment_m': 0.18,
                  'segment_no_progress_timeout_s': 6.0,

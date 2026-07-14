@@ -85,7 +85,8 @@ adaptive_ackermann_controller:
     # robot still carries old motion (measured +-+-+ churn; vehicle rock-back
     # measured ZERO by esc_direction_flip_id). Launch/flip only after the
     # commanded sign is stable this long.
-    direction_flip_debounce_s: 0.3    # faster cusp flips (was 0.5)
+    direction_flip_debounce_s: 0.5    # 0.3 REVERTED: the 0.5 exists to
+    # suppress RPP cusp flip-flop storms ('controller reversed inside')
     # Stage-2 probe scheduler: alternating steering taps (~2 mm path
     # deviation) during steady straight cruising. Measure-only; disabled.
     probe_enabled: false
