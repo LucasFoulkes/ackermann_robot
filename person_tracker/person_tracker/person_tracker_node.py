@@ -396,13 +396,13 @@ class PersonTracker(Node):
                        None)
         if current is not None:
             stale = (self.last_scan_stamp is not None and
-                     self.last_scan_stamp - current.last_moving > 8.0)
+                     self.last_scan_stamp - current.last_moving > 4.0)
             movers = [t for t in confirmed
-                      if t.id != current.id and t.speed > 0.25]
+                      if t.id != current.id and t.speed > 0.20]
             if not (stale and movers):
                 return current
             self.get_logger().info(
-                f'follow target {current.id} stationary >8 s while '
+                f'follow target {current.id} stationary >4 s while '
                 f'track {movers[0].id} is moving: switching')
         moving = [t for t in confirmed if t.speed > 0.15]
         pool = moving or confirmed

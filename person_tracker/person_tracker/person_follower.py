@@ -50,7 +50,7 @@ class PersonFollower(Node):
             'arrive_tolerance_m': 0.10,
             'max_speed_mps': 0.60,
             'speed_gain': 0.8,           # m/s per metre of distance error
-            'max_curvature_1pm': 1.1,
+            'max_curvature_1pm': 1.15,
             # Park-Kuipers law: kappa = (k2*bearing + sin(bearing)) / r,
             # v = vmax / (1 + beta*|kappa|^lambda) — speed collapses as
             # curvature demand rises (graceful approach, no orbiting).
@@ -65,6 +65,9 @@ class PersonFollower(Node):
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
             'lost_timeout_s': 2.0,
+            # Person vanished: drive once to where they were last seen
+            # (if the sighting is recent enough) before giving up.
+            'search_max_age_s': 20.0,
             'control_rate_hz': 10.0,
             # Chase-mode jam escape (nose pinned by the obstacle gate).
             'stall_escape_after_s': 3.0,
@@ -77,6 +80,8 @@ class PersonFollower(Node):
 
         self.person = None
         self.person_stamp = None
+        self.last_person_xy = None
+        self.search_done = False
         self.pose = None
         self.robot_speed = 0.0
         self.mode = 'chase'
@@ -104,6 +109,8 @@ class PersonFollower(Node):
     def _person(self, msg):
         self.person = msg
         self.person_stamp = self.get_clock().now()
+        self.last_person_xy = (msg.pose.position.x, msg.pose.position.y)
+        self.search_done = False
 
     def _odom(self, msg):
         self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
@@ -134,6 +141,18 @@ class PersonFollower(Node):
             self._stop_stream()
             if self.mode == 'reorient':
                 self._cancel_maneuver('person lost')
+            if self.mode == 'search':
+                return                   # keep driving to the last sighting
+            if (self.mode == 'chase' and self.pose is not None
+                    and self.last_person_xy is not None
+                    and not self.search_done
+                    and self.person_stamp is not None
+                    and (now - self.person_stamp).nanoseconds / 1e9
+                    < self.p['search_max_age_s']):
+                self.get_logger().info(
+                    'person lost: searching at last seen position')
+                self._start_maneuver(self.last_person_xy[0],
+                                     self.last_person_xy[1], mode='search')
             return
         dx = self.person.pose.position.x - self.pose[0]
         dy = self.person.pose.position.y - self.pose[1]
@@ -141,6 +160,9 @@ class PersonFollower(Node):
         error = distance - self.p['desired_distance_m']
         bearing = wrap(math.atan2(dy, dx) - self.pose[2])
 
+        if self.mode == 'search':
+            # Person reacquired while searching: back to direct behavior.
+            self._cancel_maneuver('person reacquired')
         if self.mode == 'reorient':
             if abs(bearing) < self.p['reorient_done_bearing_rad']:
                 self._cancel_maneuver('person back in front cone')
@@ -160,7 +182,9 @@ class PersonFollower(Node):
         if (abs(bearing) > self.p['reorient_enter_bearing_rad']
                 and (self.retry_after is None or now >= self.retry_after)):
             self._stop_stream()
-            self._start_maneuver(dx, dy, distance)
+            self._start_maneuver(self.person.pose.position.x,
+                                 self.person.pose.position.y,
+                                 mode='reorient')
             return
         if self.escape_until is not None:
             if seconds < self.escape_until:
@@ -195,11 +219,14 @@ class PersonFollower(Node):
             self.stalled_since = None
 
     # ---------------------------------------------------------- maneuver --
-    def _start_maneuver(self, dx, dy, distance):
+    def _start_maneuver(self, target_x, target_y, mode):
         if not self.navigator.server_is_ready():
             self.get_logger().warning('navigate_to_pose not ready',
                                       throttle_duration_sec=5.0)
             return
+        dx = target_x - self.pose[0]
+        dy = target_y - self.pose[1]
+        distance = max(math.hypot(dx, dy), 0.05)
         scale = max(0.0, (distance - self.p['standoff_m']) / distance)
         pose = PoseStamped()
         pose.header.frame_id = 'odom'
@@ -212,10 +239,8 @@ class PersonFollower(Node):
         goal = NavigateToPose.Goal()
         goal.pose = pose                # default BT: compute once, execute
         self.goal_pending = True
-        self.mode = 'reorient'
+        self.mode = mode
         self.reorient_started = self.get_clock().now().nanoseconds / 1e9
-        self.get_logger().info(
-            'person far off-axis: one-shot Smac maneuver to reorient')
         future = self.navigator.send_goal_async(goal)
         future.add_done_callback(self._goal_response)
 
@@ -240,7 +265,10 @@ class PersonFollower(Node):
                 rclpy.duration.Duration(seconds=self.p['retry_backoff_s'])
             self.get_logger().warning(
                 f"maneuver aborted; backing off {self.p['retry_backoff_s']} s")
-        if self.mode == 'reorient':
+        if self.mode == 'search':
+            self.search_done = True      # one search per loss, then hold
+            self.get_logger().info('search finished; holding for the person')
+        if self.mode in ('reorient', 'search'):
             self.mode = 'chase'
 
 

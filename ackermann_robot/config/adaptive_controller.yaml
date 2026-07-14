@@ -13,7 +13,7 @@ adaptive_ackermann_controller:
     scan_timeout_s: 0.50
     obstacle_stop_m: 0.20
     maximum_forward_speed_mps: 0.65
-    maximum_reverse_speed_mps: 0.30
+    maximum_reverse_speed_mps: 0.60   # parity with forward (was 0.30)
     # RPP cruise ceiling (must match desired_linear_vel in
     # nav2_odom_experiment.yaml). Raised 0.30->0.40->0.60 on 2026-07-13; the
     # actuator maximum above stays a hard clamp with headroom so the
@@ -80,7 +80,7 @@ adaptive_ackermann_controller:
     # robot still carries old motion (measured +-+-+ churn; vehicle rock-back
     # measured ZERO by esc_direction_flip_id). Launch/flip only after the
     # commanded sign is stable this long.
-    direction_flip_debounce_s: 0.5
+    direction_flip_debounce_s: 0.3    # faster cusp flips (was 0.5)
     # Stage-2 probe scheduler: alternating steering taps (~2 mm path
     # deviation) during steady straight cruising. Measure-only; disabled.
     probe_enabled: false
@@ -92,7 +92,7 @@ adaptive_ackermann_controller:
     probe_min_stop_distance_m: 1.0
     maximum_throttle_trim_effort: 0.125      # was 40 us
     forward_rolling_min_effort: -0.375       # was 1380 us
-    reverse_rolling_max_effort: 0.4375       # was 1640 us
+    reverse_rolling_max_effort: 0.50         # raised for 0.6 m/s reverse
     # Full declared authority: +/-1 by definition in the effort domain.
     forward_recovery_limit_effort: -1.0
     reverse_recovery_limit_effort: 1.0
