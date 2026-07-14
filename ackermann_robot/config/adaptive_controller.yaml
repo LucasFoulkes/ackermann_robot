@@ -40,7 +40,9 @@ adaptive_ackermann_controller:
     # wheel angle) — §11.1's portable prior. On this chassis that yields
     # ~1.31 m at 12°, matching the historical 1.30 hand constant.
     planner_trackability_prior_radius_m: -1.0
-    planner_bootstrap_wheel_angle_deg: 18.0  # bootstrap radius 1.31 -> 0.85 m
+    planner_bootstrap_wheel_angle_deg: 12.0  # 18 deg (0.85 m) REVERTED:
+    # Smac then planned cusp fragments below the dispatcher's 0.18 m
+    # minimum leg (0.09-0.15 m skipped fragments -> flip aborts).
     planner_trackability_state_path: "~/.robot/planner_trackability.yaml"
     motion_threshold_mps: 0.025
     breakaway_threshold_mps: 0.045
