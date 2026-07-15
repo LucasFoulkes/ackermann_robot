@@ -64,6 +64,12 @@ controller_server:
       lookahead_time: 1.5
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true
+      # Steer-early fix (2026-07-14): curvature computed from a SHORT fixed
+      # lookahead while velocity keeps the longer one. Without this, leg-
+      # start commands chorded the arc: commanded curvature ramped 0.85 ->
+      # 1.12 across 118 measured turning legs ('steers too late').
+      use_fixed_curvature_lookahead: true
+      curvature_lookahead_dist: 0.25
       min_approach_linear_velocity: 0.14
       approach_velocity_scaling_dist: 0.50  # was 0.60->0.35; 0.35 arrived hot at cusps,
       # 0.3-1 m, so 0.60 kept MOST of every 3-point-turn leg in the slowdown zone
