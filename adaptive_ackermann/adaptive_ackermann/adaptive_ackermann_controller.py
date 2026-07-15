@@ -1530,7 +1530,21 @@ class AdaptiveAckermannController(Node):
                         'curvature consistently opposed the map prediction'
                         % int(self.steering_polarity))
             tracking_error = abs(measured_kappa - curvature)
-            if tracking_error < 2.5:
+            # Saturation attribution gate (ODAAC §8.1, user-caught
+            # 2026-07-15): when the command is pinned at the executable
+            # cap or the servo is at its endpoint, the plant cannot
+            # deliver more no matter how good the map is — the error
+            # belongs to the SATURATED COMMAND, not the learned map.
+            # Today's command-side storms pinned curvature for whole
+            # legs and benched a healthy map over and over (the
+            # 'learning rolled back' flapping).
+            positive_cap, negative_cap = self._curvature_caps()
+            cap_here = positive_cap if curvature > 0 else negative_cap
+            saturated = (abs(curvature) >= 0.98 * cap_here or
+                         abs(self.steering_effort) >= 0.99)
+            if saturated:
+                self._reject_sample('error_ema_saturated_command')
+            if tracking_error < 2.5 and not saturated:
                 self.tracking_error_ema = (
                     tracking_error if self.tracking_error_samples == 0 else
                     .90 * self.tracking_error_ema + .10 * tracking_error)
