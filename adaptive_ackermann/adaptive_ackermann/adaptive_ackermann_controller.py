@@ -1189,7 +1189,19 @@ class AdaptiveAckermannController(Node):
             dyn = self.learned_dynamics[direction]
             return (dyn['tau_s'] + dyn['dist_m'] /
                     max(abs(speed), self.p['minimum_sustain_speed_mps']))
-        return (self.p[f'steering_lag_time_{direction}_s'] +
+        time_term = self.p[f'steering_lag_time_{direction}_s']
+        if not champion:
+            # The lag is NOT a constant: it moves with battery voltage,
+            # servo load/friction, and the slew fix changed it outright
+            # (the fixed values were measured THROUGH the old 2.0/s
+            # limiter). Blend toward the online delay estimator as its
+            # confidence grows; the fixed measurement anchors when the
+            # estimator is unsure. champion=True keeps the frozen value
+            # so shadow scoring stays against the original champion.
+            confidence = clamp(self.delay_estimator.confidence, 0.0, 1.0)
+            time_term = ((1.0 - confidence) * time_term +
+                         confidence * self.estimated_steering_delay_s)
+        return (time_term +
                 self.p[f'steering_lag_distance_{direction}_m'] /
                 max(abs(speed), self.p['minimum_sustain_speed_mps']))
 

@@ -18,9 +18,17 @@ planner_server:
       # Bootstrap value for direct launches. adaptive_navigation.launch.py
       # replaces it with the persisted four-branch trackability estimate.
       minimum_turning_radius: 1.30  # fallback; launch envelope overrides
-      reverse_penalty: 1.2   # was 2.1: maneuvers should USE reverse
+      # 1.2 produced squiggle plans: 5-segment maneuvers with 0.27 m
+      # micro-legs (2026-07-15 16:14 run), each leg costing a full
+      # stop + flip + reverse re-arm + launch (~2-4 s) — the plan
+      # optimized distance while the COST of a direction change lives
+      # entirely in execution. 1.8 makes each reverse leg earn its
+      # keep: prefer driving further on an arc over flipping (user
+      # preference, stated). 2.1 (the old value) starved legitimate
+      # maneuvers; do not go back there either.
+      reverse_penalty: 1.8
       change_penalty: 0.20
-      non_straight_penalty: 1.20
+      non_straight_penalty: 1.30  # 1.20: nudge toward longer arcs
       cost_penalty: 2.8   # keep plans farther from obstacles
       retrospective_penalty: 0.015
 
