@@ -30,10 +30,11 @@ adaptive_ackermann_controller:
     sensor_reaction_time_s: 0.10
     # Smallest odd causal window that rejects one isolated odom spike.
     odom_velocity_median_samples: 3
-    maximum_curvature_1pm: 1.15   # promotion to 1.5 REVERTED 2026-07-14: the
-    # proven steering map only certifies tracking to ~0.9; planning beyond
-    # demonstrated tracking made maneuvers incoherent. Re-promote only after
-    # a cruise-heavy refit certifies the wider region.
+    maximum_curvature_1pm: 1.35   # promoted 2026-07-14 from MEASURED full-lock
+    # capability (drill circles: kappa 1.99 LEFT / 1.40 RIGHT); 1.35 sits just
+    # under the weaker side, launch conservative limit yields ~1.30 executable.
+    # Unlike the reverted 1.5 promotion, planner radius and cornering speed
+    # remain decoupled — this raises only the executable ceiling.
     # Smac uses only this fraction of the learned physical curvature. The
     # remaining authority is reserved for local tracking correction.
     planning_curvature_utilization: 0.80
