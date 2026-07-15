@@ -58,13 +58,16 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.50
       lookahead_dist: 0.35
-      # The floor bounds worst-case feedback gain (kappa = 2y/L^2). 0.22
-      # left 41x gain at crawl: with curvature-regulated slowdown this
-      # locks into a limit cycle (pinned kappa -> slow -> shorter L ->
-      # stays pinned; the in-leg S-snake, entries measured CLEAN 0-8 cm).
-      # 0.30 = 22x max gain; good-era 0.35 never snaked but chorded
-      # short maneuver arcs — split the difference toward stability.
-      min_lookahead_dist: 0.30
+      # The floor bounds worst-case feedback gain (kappa = 2y/L^2), and the
+      # MEASURED closed-loop delay is ~0.40 s (cmd-vs-measured curvature
+      # cross-correlation, corr 0.91) — double the 0.20 s the stack
+      # compensates. Stability needs L > ~2*v*tau: at the 0.25-0.35 m/s the
+      # regulated slowdown parks us at, that is 0.20-0.28 m, so 0.22/0.25
+      # snaked, 0.30 stayed marginal (S persisted). 0.36 clears the delay
+      # budget across the slow zone; cost = mild chording on crawl arcs.
+      # Proper fix queued: feedforward-dominant preview + capped RPP
+      # feedback sized to the measured delay.
+      min_lookahead_dist: 0.36
       max_lookahead_dist: 0.75
       # 1.5 -> 1.2 with velocity-scaled CURVATURE lookahead re-enabled below:
       # crawl-speed arcs get 0.22-0.30 m (steer-early, the 118-leg chording
