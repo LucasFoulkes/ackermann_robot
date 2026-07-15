@@ -61,7 +61,11 @@ controller_server:
       min_lookahead_dist: 0.22  # was 0.35: maneuver legs are short arcs;
       # a long lookahead chords across them (straight start, late turn)
       max_lookahead_dist: 0.75
-      lookahead_time: 1.5
+      # 1.5 -> 1.2 with velocity-scaled CURVATURE lookahead re-enabled below:
+      # crawl-speed arcs get 0.22-0.30 m (steer-early, the 118-leg chording
+      # fix), cruise gets 0.60-0.75 m (the good era never snaked on
+      # straights). One mechanism, both regimes.
+      lookahead_time: 1.2
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true
       min_approach_linear_velocity: 0.14
@@ -78,16 +82,15 @@ controller_server:
       cost_scaling_dist: 0.30
       cost_scaling_gain: 1.0
       inflation_cost_scaling_factor: 3.0
-      # Steer-early fix (2026-07-14): curvature computed from a SHORT fixed
-      # lookahead while velocity keeps the longer one. Without this, leg-
-      # start commands chorded the arc: commanded curvature ramped 0.85 ->
-      # 1.12 across 118 measured turning legs ('steers too late').
-      use_fixed_curvature_lookahead: true
-      # 0.25 (steer-early fix) made kappa = 2y/L^2 a 32x error gain: a 4 cm
-      # offset pinned curvature at the clamp and the robot ORBITED the path
-      # instead of converging (57% of straight-line ticks saturated,
-      # no-progress aborts mid-straight, 2026-07-15). 0.40 keeps the
-      # steer-early benefit at ~12x gain, saturating only past ~10 cm.
+      # PATCH REMOVED 2026-07-15: fixed curvature lookahead (0.25, then
+      # 0.40) fixed arc chording ('steers too late') but a speed-invariant
+      # short lookahead is structurally unstable with our ~0.2 s actuation
+      # delay: 10 cm limit-cycle snake on straights, curvature pinned at
+      # the clamp 32-57% of straight-line time, no-progress aborts. The
+      # velocity-scaled lookahead (lookahead_time 1.2, min 0.22) provides
+      # the same steer-early behavior at crawl speeds where chording
+      # actually happened, and long stable lookahead at cruise.
+      use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.40
       use_rotate_to_heading: false
       allow_reversing: true
