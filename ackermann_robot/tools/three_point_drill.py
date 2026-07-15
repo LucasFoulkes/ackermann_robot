@@ -188,6 +188,16 @@ class Drill(Node):
         return len(phases), max_footprint
 
 
+def get_clamp():
+    r = subprocess.run(
+        ['ros2', 'param', 'get', CONTROLLER, 'maximum_curvature_1pm'],
+        capture_output=True, text=True, timeout=15)
+    try:
+        return float(r.stdout.strip().rsplit(' ', 1)[-1])
+    except ValueError:
+        return None
+
+
 def set_clamp(value):
     r = subprocess.run(
         ['ros2', 'param', 'set', CONTROLLER, 'maximum_curvature_1pm',
@@ -203,9 +213,17 @@ def main():
     rotations = int(numeric[0]) if numeric else 2
     rclpy.init()
     node = Drill()
-    # Raise the executable clamp for the drill only (comfort default 1.15
-    # stays in the yaml; planner/RPP keep their own limits regardless).
-    if not set_clamp(MAX_KAPPA):
+    # Raise the executable clamp for the drill only; the launch-time
+    # conservative value is restored on exit (planner/RPP keep their own
+    # limits regardless). Retry once: right after a stack restart the CLI
+    # daemon can briefly report Node not found while discovery converges.
+    restore = get_clamp()
+    if restore is None:
+        subprocess.run(['ros2', 'daemon', 'stop'], capture_output=True,
+                       timeout=15)
+        time.sleep(3.0)
+        restore = get_clamp()
+    if restore is None or not set_clamp(MAX_KAPPA):
         print('cannot raise clamp — is the stack running with the '
               'live-tunable build? aborting.')
         return
@@ -226,7 +244,7 @@ def main():
         node.command(0.0, 0.0)
         time.sleep(0.2)
         node.command(0.0, 0.0)
-        set_clamp(1.15)
+        set_clamp(restore)
         node.destroy_node()
         rclpy.shutdown()
         print('drill done (robot commanded to stop, clamp restored)')
