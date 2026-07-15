@@ -669,6 +669,26 @@ class PathSegmentDispatcher(Node):
                     f'{length:.3f} m < {self.minimum_segment:.3f} m')
                 continue
             segments.append(item)
+        # Skipping a fragment leaves its neighbors pointing the SAME way.
+        # Executed separately they cost a full stop + settle + relaunch
+        # between two legs of identical direction (measured 3-4 s each,
+        # nine in one maneuver, 2026-07-15). Merge them into one leg: the
+        # skipped fragment's ~0.17 m offset becomes an in-path kink the
+        # capped steering feedback absorbs while rolling.
+        merged = []
+        for segment, direction in segments:
+            if merged and merged[-1][1] == direction:
+                combined = Path()
+                combined.header = merged[-1][0].header
+                combined.poses = (list(merged[-1][0].poses) +
+                                  list(segment.poses))
+                merged[-1] = (combined, direction)
+                self.get_logger().info(
+                    'Merged consecutive same-direction segments around a '
+                    'skipped fragment')
+            else:
+                merged.append((segment, direction))
+        segments = merged
         if not segments:
             result.error_code = FollowPath.Result.INVALID_PATH
             result.error_msg = 'path has no executable segment'
