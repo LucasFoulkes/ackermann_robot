@@ -35,3 +35,7 @@ safety boundaries.
 
 Live operational tools moved to `tools/` (`auto_coverage_drive.py`,
 `preflight_session.sh`, `amnesia_exam.sh`, `convert_memory_to_effort.py`).
+
+Note (2026-07-15): files here are frozen archive copies. Live tools moved
+to `adaptive_ackermann/adaptive_ackermann/tools/` (drive_scorecard,
+steering_map_challenger) — same names there are the maintained versions.

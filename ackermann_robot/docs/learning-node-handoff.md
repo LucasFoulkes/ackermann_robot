@@ -1,3 +1,5 @@
+> **HISTORICAL** (frozen 2026-07-15) — superseded by `stack-review-2026-07-15.md` and `how-the-learner-works.md`; kept for provenance. Verdicts here may be stale.
+
 # Learning-Node Handoff — state, evidence, and remaining path
 
 Written 2026-07-11 (end of a full measurement-and-build day). Audience: an AI

@@ -11,6 +11,36 @@ def angle_difference(a, b):
     return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
+def isotonic_points(points):
+    """Project (x, y) pairs onto the nearest monotonic sequence in y.
+
+    Pool-adjacent-violators against the trend implied by the endpoints.
+    Learned maps must stay monotonic to stay invertible; a refit that
+    crosses itself steers the wrong way in the crossed region (ODAAC
+    steal #2 — the reverse-center -0.108 poisoning class).
+    Returns (projected_points, changed)."""
+    pts = sorted((float(x), float(y)) for x, y in points)
+    if len(pts) < 2:
+        return pts, False
+    sign = 1.0 if pts[-1][1] >= pts[0][1] else -1.0
+    ys = [sign * y for _, y in pts]
+    # pool adjacent violators (weights = pooled counts)
+    blocks = [[y, 1] for y in ys]
+    merged = []
+    for block in blocks:
+        merged.append(block)
+        while len(merged) > 1 and merged[-2][0] > merged[-1][0]:
+            b = merged.pop()
+            a = merged.pop()
+            total = a[1] + b[1]
+            merged.append([(a[0] * a[1] + b[0] * b[1]) / total, total])
+    projected = []
+    for value, count in merged:
+        projected.extend([value] * count)
+    changed = any(abs(a - b) > 1e-9 for a, b in zip(ys, projected))
+    return ([(x, sign * y) for (x, _), y in zip(pts, projected)], changed)
+
+
 def compose_preview_curvature(rpp_curvature, current_path_curvature,
                               future_path_curvature, confidence,
                               maximum_curvature, feedback_cap=None):
@@ -259,13 +289,20 @@ class TrackabilityEstimator:
 
     def __init__(self, prior_curvature, physical_limit,
                  minimum_curvature=0.25, state=None,
-                 learned_observations_per_branch=3):
+                 learned_observations_per_branch=3, session_id=None):
         self.prior = abs(float(prior_curvature))
         self.physical_limit = abs(float(physical_limit))
         self.minimum = min(abs(float(minimum_curvature)), self.prior)
         self.learned_observations = max(
             1, int(learned_observations_per_branch))
+        # Session consolidation (ODAAC steal #1): a session_id is passed
+        # only by the OWNING dispatcher at boot; read-only constructions
+        # (launch envelope) pass None and never trigger consolidation.
+        self.session_id = session_id
+        self.consolidated = []
         saved = (state or {}).get('branches', {})
+        new_session = (session_id is not None and
+                       session_id != (state or {}).get('last_session_id'))
         self.branches = {}
         for name in TRACKABILITY_BRANCHES:
             branch = saved.get(name, {})
@@ -290,6 +327,27 @@ class TrackabilityEstimator:
                 'last_pass': bool(branch.get('last_pass', False)),
                 'evidence': list(branch.get('evidence', []))[-64:],
             }
+            # One session's excursion is a CANDIDATE, not identity: at the
+            # first boot of a new session, an estimate whose evidence all
+            # comes from a single session decays halfway back toward the
+            # prior (a dead-pack afternoon taught 'radius 2.5 m' at
+            # confidence 1.0 on 2026-07-14 — this gate makes that class
+            # of poisoning structurally impossible). Multi-session
+            # evidence persists untouched.
+            if new_session:
+                data = self.branches[name]
+                sessions = {entry.get('session', 'legacy')
+                            for entry in data['evidence']}
+                if (len(sessions) < 2 and
+                        abs(data['estimate_1pm'] - self.prior) > 1e-6):
+                    before = data['estimate_1pm']
+                    data['estimate_1pm'] = clamp(
+                        self.prior + 0.5 * (before - self.prior),
+                        self.minimum, self.physical_limit)
+                    data['promotion_streak'] = 0
+                    data['failure_streak'] = 0
+                    self.consolidated.append(
+                        (name, before, data['estimate_1pm']))
 
     @property
     def curvature_limit(self):
@@ -320,7 +378,8 @@ class TrackabilityEstimator:
         branch['last_demand_1pm'] = demand
         branch['last_pass'] = bool(passed)
         branch['evidence'].append({
-            'demand_1pm': demand, 'passed': bool(passed)})
+            'demand_1pm': demand, 'passed': bool(passed),
+            'session': self.session_id or 'legacy'})
         branch['evidence'] = branch['evidence'][-64:]
         before = branch['estimate_1pm']
         if passed:
@@ -369,6 +428,7 @@ class TrackabilityEstimator:
             'planner_source': self.source,
             'planner_confidence': self.confidence,
             'learned_observations_per_branch': self.learned_observations,
+            'last_session_id': self.session_id,
             'branches': self.branches,
         }
 

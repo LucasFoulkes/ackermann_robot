@@ -28,7 +28,7 @@
           </Sequence>
           <!-- Give a crossing/moving obstacle time to clear before commanding
                any recovery motion. Every retry recomputes from the live pose. -->
-          <Wait wait_duration="2.0"/>
+          <Wait wait_duration="1.0"/>
           <BackUp backup_dist="0.25" backup_speed="0.10" error_code_id="{backup_code_id}"/>
         </RoundRobin>
       </ReactiveFallback>

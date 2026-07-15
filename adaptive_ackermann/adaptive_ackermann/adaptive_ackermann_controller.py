@@ -13,7 +13,7 @@ import rclpy
 import yaml
 from adaptive_ackermann.adaptive_model import (
     DelayEstimator, PathGeometry,
-    gentle_motion_requested, limit_ackermann_twist,
+    gentle_motion_requested, isotonic_points, limit_ackermann_twist,
     limit_gentle_launch_effort, polyline_projection, scan_point_clearance,
     stopping_clearance)
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -123,6 +123,15 @@ class AdaptiveAckermannController(Node):
             # sustain floor is the starting point, cruise is reached in
             # ~0.6 s at 0.8. Zero disables.
             'launch_target_ramp_mps2': 0.8,
+            # EW-variance reference for breakaway alpha damping: variance
+            # equal to this (~0.1 effort of scatter) halves the rate.
+            'breakaway_variance_reference': 0.01,
+            # Per-side executable curvature ceilings (0 = use the
+            # symmetric maximum_curvature_1pm). Measured full lock
+            # 2026-07-14: kappa 1.99 LEFT(+) / 1.40 RIGHT(-); the
+            # symmetric clamp wastes the strong side (ODAAC steal #5).
+            'maximum_curvature_positive_1pm': 0.0,
+            'maximum_curvature_negative_1pm': 0.0,
             # Steering drag raises breakaway when launching INTO a turn
             # (2026-07-14 follow sessions: 24-37% of curve-commanded time
             # spent stalled; the throttle model is 1-D by measurement, but
@@ -304,13 +313,21 @@ class AdaptiveAckermannController(Node):
         self.dynamic_parameters = {
             'navigation_speed_limit_mps', 'maximum_forward_speed_mps',
             'maximum_reverse_speed_mps', 'maximum_measured_speed_mps',
-            'maximum_curvature_1pm'}
+            'maximum_curvature_1pm', 'maximum_curvature_positive_1pm',
+            'maximum_curvature_negative_1pm'}
         self.add_on_set_parameters_callback(self._on_parameters)
         self._apply_birth_certificate()
         self.throttle_maps = {d: pairs(self.p[f'{d}_throttle_map'])
                               for d in ('forward', 'reverse')}
         self.steering_maps = {d: pairs(self.p[f'{d}_steering_map'])
                               for d in ('forward', 'reverse')}
+        for d, mp in list(self.steering_maps.items()):
+            projected, adjusted = isotonic_points(mp)
+            if adjusted:
+                self.get_logger().warning(
+                    f'{d} champion steering map was non-monotonic — '
+                    'isotonic projection applied')
+                self.steering_maps[d] = projected
         self._load_learned_steering()
         self.runtime_path = os.path.expanduser(self.p['runtime_model_path'])
         log_directory = os.path.expanduser(self.p['drive_log_directory'])
@@ -472,6 +489,11 @@ class AdaptiveAckermannController(Node):
         self.rolling_since = 0.0
         self.rolling_entry_speed = 0.0
         self.feedback_ema = 0.0
+        # ODAAC steal #4: every gated-out learning sample is counted by
+        # reason; published at 1 Hz in /controller/debug. Rejection
+        # statistics are themselves a diagnostic (a spike in one reason
+        # is a fault signature, not noise).
+        self.learning_rejections = {}
         self.probe_id = 0
         self.probe_sign = 1.0
         self.probe_until = 0.0
@@ -685,7 +707,8 @@ class AdaptiveAckermannController(Node):
                         self.throttle_probe_results,
                     'cruise_anchor': self.cruise_anchor,
                     'trim_rate': self.trim_rate,
-                    'steering_rls_models': self.steering_models,
+                    'learning_rejections': self.learning_rejections,
+                'steering_rls_models': self.steering_models,
                     'estimated_steering_delay_s': self.estimated_steering_delay_s,
                     'steering_delay_estimator': self.delay_estimator.state(),
                     'breakaway_models': self.breakaway_models,
@@ -709,9 +732,11 @@ class AdaptiveAckermannController(Node):
                 self.p['navigation_speed_limit_mps']),
             min(self.p['maximum_reverse_speed_mps'],
                 self.p['navigation_speed_limit_mps']),
-            self.p['maximum_curvature_1pm'])
+            max(self._curvature_caps()))
         # This is the sole executable-command boundary. Collision Monitor must
         # inspect the same nonzero speed and curvature the hardware will use.
+        # (Per-side asymmetry is applied at execution in _desired; the
+        # monitor may see the stronger side's envelope — conservative.)
         self.command_gate_reason = ''
         if abs(linear) >= .01:
             curvature = angular / linear
@@ -894,7 +919,7 @@ class AdaptiveAckermannController(Node):
             self.speed = sorted(self.speed_history)[len(self.speed_history) // 2]
             self.yaw_rate = sorted(self.yaw_rate_history)[len(self.yaw_rate_history) // 2]
             yaw_envelope = (
-                self.p['maximum_curvature_1pm'] *
+                max(self._curvature_caps()) *
                 self.p['maximum_measured_speed_mps'])
             self.odom_outlier = (
                 len(self.speed_history) == self.speed_history.maxlen and
@@ -947,10 +972,8 @@ class AdaptiveAckermannController(Node):
             self.cmd.linear.x, -self.p['maximum_reverse_speed_mps'],
             self.p['maximum_forward_speed_mps'])
         if abs(requested_v) < .01: return 0., 0., 'zero command'
-        curvature = clamp(
-            self.cmd.angular.z / requested_v,
-            -self.p['maximum_curvature_1pm'],
-                          self.p['maximum_curvature_1pm'])
+        curvature = self._clamp_curvature(
+            self.cmd.angular.z / requested_v)
         # Minimum sustainable speed and steering-transition slowdown were
         # already applied before Collision Monitor. Execute the approved Twist
         # unchanged; downstream safety logic may only replace it with zero.
@@ -1043,6 +1066,13 @@ class AdaptiveAckermannController(Node):
                 if len(points) < 4:
                     raise ValueError(
                         f'{direction}: only {len(points)} usable knots')
+                # ODAAC steal #2: a non-monotonic inverse steers the wrong
+                # way inside the crossing. Project instead of trusting.
+                points, adjusted = isotonic_points(points)
+                if adjusted:
+                    self.get_logger().warning(
+                        f'{direction} learned inverse map was non-monotonic'
+                        ' — isotonic projection applied')
                 trust = self.p['learned_steering_trust_kappa_1pm']
                 boot_trust = \
                     self.p['learned_steering_bootstrap_trust_kappa_1pm']
@@ -1101,9 +1131,7 @@ class AdaptiveAckermannController(Node):
         gain = max(.4, model['gain'])
         identified_input = (curvature - model['bias']) / gain
         corrected_curvature = curvature + confidence * (identified_input - curvature)
-        corrected_curvature = clamp(
-            corrected_curvature, -self.p['maximum_curvature_1pm'],
-            self.p['maximum_curvature_1pm'])
+        corrected_curvature = self._clamp_curvature(corrected_curvature)
         champion = clamp(
             interpolate(self.steering_maps[direction], corrected_curvature),
             -1.0, 1.0)
@@ -1253,10 +1281,8 @@ class AdaptiveAckermannController(Node):
         applied_blend = (
             blend if self.p['apply_path_preview_compensation'] else 0.0)
         future_command = preview_curvature + feedback
-        compensated = clamp(
-            rpp_curvature + applied_blend * (future_command - rpp_curvature),
-            -self.p['maximum_curvature_1pm'],
-            self.p['maximum_curvature_1pm'])
+        compensated = self._clamp_curvature(
+            rpp_curvature + applied_blend * (future_command - rpp_curvature))
         assist_active = False
         result.update({
             'path_curvature_now_1pm': current_path_curvature,
@@ -1295,6 +1321,20 @@ class AdaptiveAckermannController(Node):
             return None
         return min(candidates, key=lambda item: abs(item[0] - stamp))[1]
 
+    def _curvature_caps(self):
+        base = self.p['maximum_curvature_1pm']
+        positive = self.p['maximum_curvature_positive_1pm'] or base
+        negative = self.p['maximum_curvature_negative_1pm'] or base
+        return positive, negative
+
+    def _clamp_curvature(self, curvature):
+        positive, negative = self._curvature_caps()
+        return clamp(curvature, -negative, positive)
+
+    def _reject_sample(self, reason):
+        self.learning_rejections[reason] = (
+            self.learning_rejections.get(reason, 0) + 1)
+
     def _learn_breakaway(self, now, direction):
         if math.isfinite(self.startup_kick_effort):
             # Pulse held when raw motion first appeared: the direct causal
@@ -1305,9 +1345,11 @@ class AdaptiveAckermannController(Node):
             causal = self._causal_throttle_effort(
                 now - self.p[f'steering_lag_time_{direction}_s'], direction)
         if causal is None:
+            self._reject_sample('breakaway_no_causal_command')
             return
         if ((direction == 'forward' and not -1.05 <= causal < 0.0) or
                 (direction == 'reverse' and not 0.0 < causal <= 1.05)):
+            self._reject_sample('breakaway_implausible_effort')
             return
         model = self.breakaway_models[direction]
         forgetting = (
@@ -1315,8 +1357,17 @@ class AdaptiveAckermannController(Node):
             if self.session_launches[direction] <
             self.p['session_warmup_launches']
             else self.p['breakaway_forgetting_factor'])
-        model['effort'] = (forgetting * model['effort'] +
-                             (1.0 - forgetting) * causal)
+        # ODAAC steal #3: variance-damped learning rate. Inconsistent
+        # evidence (EW variance of the innovation) SLOWS the update
+        # instead of being averaged in; bounded so a genuine shift
+        # (pack swap) still converges at >=1/4 speed.
+        error = causal - model['effort']
+        model['variance'] = (.9 * model.get('variance', 0.0) +
+                             .1 * error * error)
+        damp = max(.25, 1.0 / (
+            1.0 + model['variance'] /
+            self.p['breakaway_variance_reference']))
+        model['effort'] += (1.0 - forgetting) * damp * error
         model['observations'] += 1
         self.session_launches[direction] += 1
         self.startup_causal_effort = causal
@@ -1341,6 +1392,7 @@ class AdaptiveAckermannController(Node):
         map_offset = interpolate(self.throttle_maps[direction],
                                  abs(self.speed)) - neutral
         if abs(map_offset) < 0.0625:
+            self._reject_sample('effort_scale_weak_map_signal')
             return
         observed = clamp((self.throttle_effort - neutral) / map_offset, 0.7, 1.3)
         dt = max(0.0, now - self.effort_scale_time)
@@ -1385,6 +1437,9 @@ class AdaptiveAckermannController(Node):
         # learning state. The RLS residual EMA cannot serve here: it freezes
         # while the learned map is applied (identification guard), which the
         # 2026-07-12 rollback drill proved blinds the rollback trigger.
+        if (fresh_odom and self.state == 'rolling'
+                and self.odom_outlier and abs(target) > .01):
+            self._reject_sample('odom_outlier')
         if (fresh_odom and self.state == 'rolling'
                 and not self.odom_outlier and abs(target) > .01):
             # Weak-plant achievability: how much of the commanded speed the
@@ -2128,6 +2183,7 @@ class AdaptiveAckermannController(Node):
         direction = self.direction
         if any(sample[4] != direction for sample in candidates):
             self.motion_history.clear()
+            self._reject_sample('identification_direction_mixed')
             return
         signed_distance = 0.0
         yaw_change = 0.0
@@ -2141,6 +2197,7 @@ class AdaptiveAckermannController(Node):
             return
         measured = yaw_change / signed_distance
         if not math.isfinite(measured) or abs(measured) > 2.5:
+            self._reject_sample('identification_kappa_outlier')
             return
         start, end = candidates[0][0], candidates[-1][0]
         available = {}
@@ -2338,6 +2395,7 @@ class AdaptiveAckermannController(Node):
                 'closest_obstacle_m': self.closest, 'trim': self.trim,
                 'front_clearance_m': self.closest_forward,
                 'rear_clearance_m': self.closest_reverse,
+                'learning_rejections': self.learning_rejections,
                 'steering_rls_models': self.steering_models,
                 'steering_model_confidence': {
                     key: self._model_confidence(model)

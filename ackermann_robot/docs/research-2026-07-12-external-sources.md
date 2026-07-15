@@ -1,3 +1,5 @@
+> **HISTORICAL** (frozen 2026-07-15) — superseded by `stack-review-2026-07-15.md` and `how-the-learner-works.md`; kept for provenance. Verdicts here may be stale.
+
 # External-source research digest — 2026-07-12
 
 Deep-research pass over 20 user-supplied sources (RC platforms, Nav2 issues,

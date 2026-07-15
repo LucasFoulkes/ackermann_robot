@@ -1,3 +1,5 @@
+> **HISTORICAL** (frozen 2026-07-15) — superseded by `stack-review-2026-07-15.md` and `how-the-learner-works.md`; kept for provenance. Verdicts here may be stale.
+
 # Review — first autonomous experiment day (2026-07-12)
 
 Five autonomous Nav2 coverage sessions, two offline learning studies, and the

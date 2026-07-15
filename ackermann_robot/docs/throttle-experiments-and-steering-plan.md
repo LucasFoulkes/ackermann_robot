@@ -1,3 +1,5 @@
+> **HISTORICAL** (frozen 2026-07-15) — superseded by `stack-review-2026-07-15.md` and `how-the-learner-works.md`; kept for provenance. Verdicts here may be stale.
+
 # ESC throttle experiments and steering-learning plan
 
 ## Purpose and status

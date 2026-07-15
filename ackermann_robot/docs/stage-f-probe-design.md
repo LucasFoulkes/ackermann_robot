@@ -1,3 +1,5 @@
+> **HISTORICAL** (frozen 2026-07-15) — superseded by `stack-review-2026-07-15.md` and `how-the-learner-works.md`; kept for provenance. Verdicts here may be stale.
+
 # Stage F design brief — throttle-map identification by probe excitation
 
 Basis: adversarially verified deep-research pass, 2026-07-13 (105 agents;

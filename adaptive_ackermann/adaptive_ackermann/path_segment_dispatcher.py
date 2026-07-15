@@ -177,8 +177,17 @@ class PathSegmentDispatcher(Node):
         physical = float(
             self.get_parameter('trackability_physical_limit_1pm').value)
         saved = self._load_trackability_state()
+        # Session id drives the consolidation gate: single-session estimate
+        # excursions decay toward the prior at the next boot unless a second
+        # session independently reproduced them (ODAAC steal #1).
+        session_id = time.strftime('%Y%m%d_%H%M%S')
         self.trackability = TrackabilityEstimator(
-            prior, physical, state=saved)
+            prior, physical, state=saved, session_id=session_id)
+        for name, before, after in self.trackability.consolidated:
+            self.get_logger().info(
+                f'Trackability {name}: single-session estimate '
+                f'{before:.2f} -> {after:.2f} 1/m (consolidation decay '
+                f'toward prior; reproduce it this session to keep it)')
         # Stage E: apply qualified trackability evidence to the NEXT goal in
         # the same process instead of waiting for a relaunch (doc §11.3).
         # NOTE: trackability_physical_limit_1pm arrives from launch with the
