@@ -79,7 +79,12 @@ adaptive_ackermann_controller:
     # local map slope) weaker than the sustain effort while the robust
     # observer confirms motion. Speed units because a fixed offset was worth
     # ~2x more speed in reverse (shallow slope) and caused reverse stalls.
-    startup_drop_through_mps: 0.15
+    # 0.15 -> 0.08 (2026-07-15): measured launch shape was pop 0.45 ->
+    # TROUGH 0.06 (near-stall) -> climb — the drop was killing the pop so
+    # hard it created the surge-brake-surge lunge. 0.15 was tuned before
+    # the launch target ramp and pop-riding existed; they now own the
+    # tail, the drop only needs to unwind breakaway effort.
+    startup_drop_through_mps: 0.08
     # Ramp the throttle target from the sustain floor after breakaway
     # (reaches 0.6 cruise in ~0.6 s): commanding cruise instantly at
     # breakaway was the launch-lunge amplifier.
