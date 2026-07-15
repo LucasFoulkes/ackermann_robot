@@ -12,7 +12,7 @@ import time
 import rclpy
 import yaml
 from adaptive_ackermann.adaptive_model import (
-    DelayEstimator, PathGeometry, compose_preview_curvature,
+    DelayEstimator, PathGeometry,
     gentle_motion_requested, limit_ackermann_twist,
     limit_gentle_launch_effort, polyline_projection, scan_point_clearance,
     stopping_clearance)
@@ -218,6 +218,11 @@ class AdaptiveAckermannController(Node):
             # path's own demand. Sized to the MEASURED ~0.4 s loop delay:
             # larger corrections limit-cycle instead of converging.
             'steering_feedback_cap_1pm': 0.40,
+            # Low-pass on the (capped) feedback term, time constant sized
+            # to the measured ~0.4 s loop delay: bang-bang flips faster
+            # than the loop can observe are what sustain the residual
+            # limit cycle. DC gain is 1 — steady offsets still converge.
+            'steering_feedback_tau_s': 0.4,
             # MPPI chose only ~0.22 1/m for a certified 1.15 1/m reverse arc
             # in the 11:17 drive. Supply the missing same-sign path curvature,
             # while preserving stronger/opposite MPPI recovery corrections.
@@ -465,6 +470,8 @@ class AdaptiveAckermannController(Node):
         self.last_cmd_sign = 0
         self.cmd_sign_since = 0.0
         self.rolling_since = 0.0
+        self.rolling_entry_speed = 0.0
+        self.feedback_ema = 0.0
         self.probe_id = 0
         self.probe_sign = 1.0
         self.probe_until = 0.0
@@ -1177,6 +1184,7 @@ class AdaptiveAckermannController(Node):
             now - self.path_time > self.p['path_timeout_s'])
         if (self.path_geometry is None or self.path_time is None or
                 path_stale or self.pose is None):
+            self.feedback_ema = 0.0
             self.preview = result
             return rpp_curvature
         geometry = self.path_geometry
@@ -1197,6 +1205,7 @@ class AdaptiveAckermannController(Node):
             'path_end_distance_m': geometry.remaining_path(index),
         })
         if path_direction != direction_sign:
+            self.feedback_ema = 0.0
             self.preview = result
             return rpp_curvature
         lookahead = clamp(
@@ -1206,7 +1215,11 @@ class AdaptiveAckermannController(Node):
             index, direction_sign, lookahead)
         raw_feedback = rpp_curvature - current_path_curvature
         cap = self.p['steering_feedback_cap_1pm']
-        feedback = clamp(raw_feedback, -cap, cap)
+        tick_dt = 1.0 / self.p['control_rate_hz']
+        alpha = tick_dt / (self.p['steering_feedback_tau_s'] + tick_dt)
+        self.feedback_ema += alpha * (
+            clamp(raw_feedback, -cap, cap) - self.feedback_ema)
+        feedback = self.feedback_ema
         # Measured per-direction lag (2026-07-11 step experiment) replaces the
         # online delay estimate; the estimator still runs for telemetry.
         delay = self._steering_lag(direction, target_speed)
@@ -1231,12 +1244,19 @@ class AdaptiveAckermannController(Node):
             preview_curvature = geometry.pure_pursuit_curvature(
                 preview_index, direction_sign, lookahead)
             candidate = preview_curvature + feedback
+        # All-or-nothing above the trust threshold: a partial blend leaks
+        # (1 - blend) of UNCAPPED RPP into the command — at 0.87 that was
+        # +-0.17 of the residual snake. Below threshold, raw RPP (the
+        # safe fallback when the model is unknown) as before.
+        if blend >= 0.5:
+            blend = 1.0
         applied_blend = (
             blend if self.p['apply_path_preview_compensation'] else 0.0)
-        compensated = compose_preview_curvature(
-            rpp_curvature, current_path_curvature, preview_curvature,
-            applied_blend, self.p['maximum_curvature_1pm'],
-            feedback_cap=cap)
+        future_command = preview_curvature + feedback
+        compensated = clamp(
+            rpp_curvature + applied_blend * (future_command - rpp_curvature),
+            -self.p['maximum_curvature_1pm'],
+            self.p['maximum_curvature_1pm'])
         assist_active = False
         result.update({
             'path_curvature_now_1pm': current_path_curvature,
@@ -1640,7 +1660,13 @@ class AdaptiveAckermannController(Node):
             if ramp > 0.0:
                 age = (now - self.rolling_since
                        if self.state == 'rolling' else 0.0)
-                allowed = self.p['minimum_sustain_speed_mps'] + ramp * age
+                # Start the ramp at the speed the breakaway pop actually
+                # delivered (~0.25-0.3), not the sustain floor: starting at
+                # 0.12 while already moving at 0.3 commands an immediate
+                # brake into the pop — the stall/re-pop 'lunge' cycle.
+                start = max(self.p['minimum_sustain_speed_mps'],
+                            self.rolling_entry_speed)
+                allowed = start + ramp * age
                 if abs(target) > allowed:
                     target = math.copysign(allowed, target)
             base = interpolate(self.throttle_maps[direction], abs(target))
@@ -1682,6 +1708,7 @@ class AdaptiveAckermannController(Node):
                 if directional_speed >= self.p['breakaway_threshold_mps']:
                     self.state = 'rolling'
                     self.rolling_since = now
+                    self.rolling_entry_speed = abs(directional_speed)
                 elif (now - self.planned_stop_since >
                         self.p['planned_stop_wait_s']):
                     self.state = 'recovery'
@@ -1759,6 +1786,7 @@ class AdaptiveAckermannController(Node):
                         self._learn_breakaway(now, direction)
                     self.state = 'rolling'; self.low_samples = self.limit_dwell = 0
                     self.rolling_since = now
+                    self.rolling_entry_speed = abs(directional_speed)
                     target_throttle = base + self.trim[trim_key]
                 else:
                     # Weaker than sustain during the confirmation window: the
