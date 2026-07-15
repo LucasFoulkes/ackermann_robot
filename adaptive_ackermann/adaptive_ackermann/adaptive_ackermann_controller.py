@@ -970,6 +970,14 @@ class AdaptiveAckermannController(Node):
             planning_speed, self.p['sensor_reaction_time_s'],
             self.p['minimum_braking_deceleration_mps2'],
             self.p['obstacle_stop_m'])
+        # The clearance corridor must bend with the CURRENT request —
+        # updating this after the gates deadlocked cusp departures: the
+        # corridor stayed bent for the finished forward leg while the
+        # reverse leg (opposite lock) was being judged, so the gate saw a
+        # phantom obstacle for 6.4 s (2026-07-15 18:55 flip).
+        if abs(self.cmd.linear.x) > .01:
+            self.last_commanded_curvature = self._clamp_curvature(
+                self.cmd.angular.z / self.cmd.linear.x)
         if (self.cmd.linear.x > 0. and
                 self.closest_forward < self.required_stop_clearance):
             return 0., 0., 'forward obstacle stop'
@@ -1577,10 +1585,6 @@ class AdaptiveAckermannController(Node):
                  (self.direction == 'forward') != (sign_now > 0))):
             stop_reason = 'direction settle'
         rpp_curvature = curvature
-        # Clearance corridor bends with the commanded arc; hold the last
-        # driving curvature (decay to straight when not commanding).
-        self.last_commanded_curvature = (
-            curvature if abs(target) > .01 else 0.0)
         if stop_reason or abs(self.speed) > self.p['maximum_measured_speed_mps']:
             self.fault = stop_reason or 'measured overspeed'; self.state = 'stopped'
             self.direction = None; self.low_samples = self.limit_dwell = 0
