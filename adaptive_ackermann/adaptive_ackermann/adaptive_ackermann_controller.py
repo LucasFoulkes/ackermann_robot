@@ -294,7 +294,8 @@ class AdaptiveAckermannController(Node):
         # 1 Hz /speed_limit publication propagates the change to Nav2.
         self.dynamic_parameters = {
             'navigation_speed_limit_mps', 'maximum_forward_speed_mps',
-            'maximum_reverse_speed_mps', 'maximum_measured_speed_mps'}
+            'maximum_reverse_speed_mps', 'maximum_measured_speed_mps',
+            'maximum_curvature_1pm'}
         self.add_on_set_parameters_callback(self._on_parameters)
         self._apply_birth_certificate()
         self.throttle_maps = {d: pairs(self.p[f'{d}_throttle_map'])

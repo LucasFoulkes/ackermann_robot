@@ -23,6 +23,7 @@ Needs ~1.5 m of clear space around the robot. Ctrl-C stops cleanly.
 """
 
 import math
+import subprocess
 import sys
 import time
 
@@ -31,7 +32,11 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 
-MAX_KAPPA = 1.15          # the certified executable limit; ask for ALL of it
+# Ask BEYOND what the steering map believes full lock delivers (~2.0 right
+# / ~1.4 left), so the interpolated effort saturates at +/-1.0: genuine
+# wheel lock on every phase, and the map's first full-lock measurements.
+MAX_KAPPA = 2.5
+CONTROLLER = '/adaptive_ackermann_controller'
 CRAWL = 0.16              # phase speed (m/s)
 PHASE_MAX_S = 3.0
 PHASE_MAX_DIST = 0.35     # keep-in-place: end phase after this much travel
@@ -141,10 +146,26 @@ class Drill(Node):
         return len(phases), max_footprint
 
 
+def set_clamp(value):
+    r = subprocess.run(
+        ['ros2', 'param', 'set', CONTROLLER, 'maximum_curvature_1pm',
+         str(value)], capture_output=True, text=True, timeout=15)
+    ok = 'successful' in r.stdout
+    print(f'controller curvature clamp -> {value} '
+          f'({"ok" if ok else "FAILED: " + r.stdout.strip() + r.stderr.strip()})')
+    return ok
+
+
 def main():
     rotations = int(sys.argv[1]) if len(sys.argv) > 1 else 2
     rclpy.init()
     node = Drill()
+    # Raise the executable clamp for the drill only (comfort default 1.15
+    # stays in the yaml; planner/RPP keep their own limits regardless).
+    if not set_clamp(MAX_KAPPA):
+        print('cannot raise clamp — is the stack running with the '
+              'live-tunable build? aborting.')
+        return
     try:
         for i in range(rotations):
             side = 1 if i % 2 == 0 else -1
@@ -156,9 +177,10 @@ def main():
         node.command(0.0, 0.0)
         time.sleep(0.2)
         node.command(0.0, 0.0)
+        set_clamp(1.15)
         node.destroy_node()
         rclpy.shutdown()
-        print('drill done (robot commanded to stop)')
+        print('drill done (robot commanded to stop, clamp restored)')
 
 
 if __name__ == '__main__':
