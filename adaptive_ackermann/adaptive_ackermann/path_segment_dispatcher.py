@@ -501,24 +501,36 @@ class PathSegmentDispatcher(Node):
                 blocked_path_timeout=self.blocked_path_timeout,
                 minimum_watched_length=self.watch_min_length)
             handover = False
+            remaining = metric['length'] - metric['current_progress_m']
+            next_direction = metric.get('next_direction')
             if reason == 'controller reversed inside a committed segment':
-                remaining = metric['length'] - metric['current_progress_m']
-                next_direction = metric.get('next_direction')
                 commanded = self.pre_monitor_command[0]
                 handover = (
                     next_direction is not None and
                     next_direction != metric['direction'] and
                     remaining <= self.cusp_handover_window and
                     commanded * next_direction > 0.0)
+            elif reason == 'no chronological progress on committed segment':
+                # Stalled within the handover window of the segment end =
+                # ARRIVED, whatever refuses the last centimeters (measured
+                # case: the clearance gate rightly refusing to creep at a
+                # wall-adjacent cusp — the abort/replan cycle cost 8.6 s
+                # per occurrence, 2026-07-15 18:46 maneuver). The next leg
+                # departs AWAY from the blockage by construction.
+                handover = (
+                    next_direction is not None and
+                    next_direction != metric['direction'] and
+                    remaining <= self.cusp_handover_window)
             if reason:
                 metric['abort_reason'] = CUSP_HANDOVER if handover else reason
                 metric['contaminated'] = not handover
                 metric['cancel_requested'] = True
                 backend_goal = metric.get('backend_goal')
                 if handover:
-                    reason = (f'cusp handover: controller already pulling '
-                              f'into the next segment with '
-                              f'{max(remaining, 0.0):.2f} m remaining')
+                    reason = (f'cusp handover: segment end within '
+                              f'{max(remaining, 0.0):.2f} m while '
+                              f'{"reversed" if "reversed" in reason else "stalled"}'
+                              f' — completing instead of replanning')
         if backend_goal is not None:
             if 'handover' in reason:
                 self.get_logger().info(f'Completing segment early: {reason}')
