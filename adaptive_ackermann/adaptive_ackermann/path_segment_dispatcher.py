@@ -29,6 +29,11 @@ from adaptive_ackermann.adaptive_model import (
     polyline_projection, segment_abort_reason, segment_goal_checker)
 
 
+# Sentinel abort reason meaning "segment complete at its cusp": the goal
+# proceeds to the next segment instead of aborting for fresh planning.
+CUSP_HANDOVER = 'cusp handover'
+
+
 def yaw_from_quaternion(q):
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                       1.0 - 2.0 * (q.y * q.y + q.z * q.z))
@@ -117,6 +122,13 @@ class PathSegmentDispatcher(Node):
         self.declare_parameter('segment_path_check_period_s', 0.50)
         self.declare_parameter('segment_path_check_horizon_m', 1.50)
         self.declare_parameter('segment_blocked_path_timeout_s', 0.75)
+        # A "reversal" this close to a committed segment's end, commanding
+        # the NEXT segment's direction, is RPP already driving the next leg
+        # (its lookahead crossed the cusp before the goal checker fired) —
+        # hand the segment over instead of aborting the goal for fresh
+        # planning. 2026-07-14: this signature caused 6 aborts and 1 failed
+        # goal in one session, with endpoint errors of ~8 cm at abort time.
+        self.declare_parameter('cusp_handover_window_m', 0.25)
         frontend = self.get_parameter('frontend_action_name').value
         backend = self.get_parameter('backend_action_name').value
         self.settle_time = float(self.get_parameter('cusp_settle_time_s').value)
@@ -158,6 +170,8 @@ class PathSegmentDispatcher(Node):
             self.get_parameter('segment_path_check_horizon_m').value)
         self.blocked_path_timeout = float(
             self.get_parameter('segment_blocked_path_timeout_s').value)
+        self.cusp_handover_window = float(
+            self.get_parameter('cusp_handover_window_m').value)
         prior = 1.0 / float(
             self.get_parameter('trackability_prior_radius_m').value)
         physical = float(
@@ -362,7 +376,8 @@ class PathSegmentDispatcher(Node):
                 abs(math.atan2(math.sin(current[2] - target[2]),
                                math.cos(current[2] - target[2]))))
 
-    def _begin_metric(self, segment, direction, backend_goal):
+    def _begin_metric(self, segment, direction, backend_goal,
+                      next_direction=None):
         samples, _, length, curvature = segment_properties(segment)
         with self.metric_lock:
             entry_xy, entry_yaw = self._pose_error(self.pose, samples[0])
@@ -370,6 +385,7 @@ class PathSegmentDispatcher(Node):
                 samples, *self.pose)[2] if self.pose is not None else 0.0)
             self.active_metric = {
                 'samples': samples, 'direction': direction, 'length': length,
+                'next_direction': next_direction,
                 'curvature': curvature, 'entry_xy': entry_xy,
                 'entry_yaw': entry_yaw, 'xte': [], 'heading': [],
                 'commanded_samples': 0, 'blocked_samples': 0,
@@ -467,14 +483,31 @@ class PathSegmentDispatcher(Node):
                 wrong_direction_timeout=self.wrong_direction_timeout,
                 blocked_path_timeout=self.blocked_path_timeout,
                 minimum_watched_length=self.watch_min_length)
+            handover = False
+            if reason == 'controller reversed inside a committed segment':
+                remaining = metric['length'] - metric['current_progress_m']
+                next_direction = metric.get('next_direction')
+                commanded = self.pre_monitor_command[0]
+                handover = (
+                    next_direction is not None and
+                    next_direction != metric['direction'] and
+                    remaining <= self.cusp_handover_window and
+                    commanded * next_direction > 0.0)
             if reason:
-                metric['abort_reason'] = reason
-                metric['contaminated'] = True
+                metric['abort_reason'] = CUSP_HANDOVER if handover else reason
+                metric['contaminated'] = not handover
                 metric['cancel_requested'] = True
                 backend_goal = metric.get('backend_goal')
+                if handover:
+                    reason = (f'cusp handover: controller already pulling '
+                              f'into the next segment with '
+                              f'{max(remaining, 0.0):.2f} m remaining')
         if backend_goal is not None:
-            self.get_logger().error(
-                f'Aborting segment for fresh planning: {reason}')
+            if 'handover' in reason:
+                self.get_logger().info(f'Completing segment early: {reason}')
+            else:
+                self.get_logger().error(
+                    f'Aborting segment for fresh planning: {reason}')
             future = backend_goal.cancel_goal_async()
             self.cancel_futures.add(future)
             future.add_done_callback(self._cancel_complete)
@@ -490,7 +523,7 @@ class PathSegmentDispatcher(Node):
                 f'Backend segment cancel request failed: {error}')
         if accepted:
             self.get_logger().warning(
-                'Backend accepted segment cancellation for fresh planning')
+                'Backend accepted segment cancellation')
             return
         self.get_logger().error('Backend rejected segment cancellation')
         # Allow the timer to retry rather than leaving a live backend action
@@ -524,7 +557,12 @@ class PathSegmentDispatcher(Node):
             metric['entry_yaw'] <= self.entry_yaw_limit and
             blocked <= self.blocked_limit and
             not metric['contaminated'])
-        passed = (backend_succeeded and xte_p90 <= self.xte_limit and
+        # A cusp handover IS reaching the segment end (within the handover
+        # window, tracking clean) — the backend result is CANCELED only
+        # because we canceled it ourselves.
+        completed = (backend_succeeded or
+                     metric['abort_reason'] == CUSP_HANDOVER)
+        passed = (completed and xte_p90 <= self.xte_limit and
                   heading_p90 <= self.heading_limit)
         branch = ('forward' if metric['direction'] > 0 else 'reverse')
         branch += '_positive' if metric['curvature'] >= 0.0 else '_negative'
@@ -674,7 +712,10 @@ class PathSegmentDispatcher(Node):
                     return result
                 self.backend_goals[key] = backend_goal
                 self.segment_pub.publish(segment)
-                self._begin_metric(segment, direction, backend_goal)
+                self._begin_metric(
+                    segment, direction, backend_goal,
+                    next_direction=(segments[index + 1][1]
+                                    if index + 1 < len(segments) else None))
                 self.get_logger().info(
                     f'Segment {index + 1}/{len(segments)}: '
                     f'{"forward" if direction > 0 else "reverse"}, '
@@ -690,12 +731,19 @@ class PathSegmentDispatcher(Node):
                     else:
                         goal_handle.abort()
                     return result
-                if abort_reason:
+                if abort_reason == CUSP_HANDOVER:
+                    # Segment completed at its cusp; the backend CANCELED
+                    # status is our own doing. Fall through to the settle
+                    # dwell and dispatch the next segment.
+                    self.get_logger().info(
+                        f'Segment {index + 1}/{len(segments)} handed over '
+                        f'at cusp')
+                elif abort_reason:
                     result.error_code = FollowPath.Result.FAILED_TO_MAKE_PROGRESS
                     result.error_msg = abort_reason
                     goal_handle.abort()
                     return result
-                if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
+                elif wrapped.status != GoalStatus.STATUS_SUCCEEDED:
                     result = wrapped.result
                     if wrapped.status == GoalStatus.STATUS_CANCELED:
                         goal_handle.canceled()
