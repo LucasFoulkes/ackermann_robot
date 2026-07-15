@@ -60,7 +60,7 @@ class PersonFollower(Node):
             'band_inner_m': 0.30,
             'band_retreat_stop_m': 0.45,
             'band_outer_m': 0.75,
-            'max_speed_mps': 0.60,
+            'max_speed_mps': 0.50,
             'speed_gain': 0.8,           # m/s per metre of distance error
             'max_curvature_1pm': 1.15,
             # Park-Kuipers law: kappa = (k2*bearing + sin(bearing)) / r,

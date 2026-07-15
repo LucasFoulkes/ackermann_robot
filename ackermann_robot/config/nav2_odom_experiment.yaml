@@ -56,7 +56,7 @@ controller_server:
       # proxy prevents its Jazzy cusp-pruning defect by sending one direction
       # segment at a time.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.60
+      desired_linear_vel: 0.50
       lookahead_dist: 0.35
       min_lookahead_dist: 0.22  # was 0.35: maneuver legs are short arcs;
       # a long lookahead chords across them (straight start, late turn)
