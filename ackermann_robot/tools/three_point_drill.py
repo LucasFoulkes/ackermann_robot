@@ -113,9 +113,11 @@ class Drill(Node):
         self.command(0.0, 0.0)
         if kappas:
             k = sorted(kappas)[len(kappas) // 2]
+            # start pose lies ON the circle, so max displacement from it
+            # is already the full diameter
             print(f'  => {math.degrees(rotated):+.0f} deg, measured '
                   f'full-lock |kappa| {k:.2f} (radius {1.0 / max(k, .01):.2f}'
-                  f' m), circle diameter ~{2 * max_footprint:.2f} m, '
+                  f' m), circle diameter ~{max_footprint:.2f} m, '
                   f'{time.monotonic() - t0:.0f} s')
         else:
             print('  => no rolling samples (never reached 0.08 m/s)')
