@@ -58,8 +58,13 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.50
       lookahead_dist: 0.35
-      min_lookahead_dist: 0.22  # was 0.35: maneuver legs are short arcs;
-      # a long lookahead chords across them (straight start, late turn)
+      # The floor bounds worst-case feedback gain (kappa = 2y/L^2). 0.22
+      # left 41x gain at crawl: with curvature-regulated slowdown this
+      # locks into a limit cycle (pinned kappa -> slow -> shorter L ->
+      # stays pinned; the in-leg S-snake, entries measured CLEAN 0-8 cm).
+      # 0.30 = 22x max gain; good-era 0.35 never snaked but chorded
+      # short maneuver arcs — split the difference toward stability.
+      min_lookahead_dist: 0.30
       max_lookahead_dist: 0.75
       # 1.5 -> 1.2 with velocity-scaled CURVATURE lookahead re-enabled below:
       # crawl-speed arcs get 0.22-0.30 m (steer-early, the 118-leg chording
@@ -157,21 +162,38 @@ collision_monitor:
       polygon_pub_topic: directional_stop
       enabled: true
       holonomic: false
-      velocity_polygons: ["forward", "reverse", "stopped"]
+      # Bands must cover the FULL current envelope (cruise 0.50, clamp 0.55,
+      # overspeed tripwire 0.75, |kappa| <= 1.30 -> |w| up to ~1.0). A
+      # velocity outside every band is NOT collision-checked (the monitor
+      # only warns) — the old 0.31/0.36 limits, sized for the retired
+      # |v|<=0.30 envelope, silently disabled protection at cruise speed.
+      velocity_polygons: ["forward", "forward_fast", "reverse",
+                          "reverse_fast", "stopped"]
       forward:
         points: "[[0.42, 0.19], [0.42, -0.19], [0.00, -0.19], [0.00, 0.19]]"
         linear_min: 0.01
-        # /cmd_vel_nav has already passed through the adaptive node's
-        # Ackermann envelope: |v| <= 0.30 and |w/v| <= 1.15.
         linear_max: 0.31
-        theta_min: -0.36
-        theta_max: 0.36
+        theta_min: -0.45
+        theta_max: 0.45
+      forward_fast:
+        # Longer stop rectangle: braking from 0.55-0.75 m/s needs the room.
+        points: "[[0.62, 0.19], [0.62, -0.19], [0.00, -0.19], [0.00, 0.19]]"
+        linear_min: 0.31
+        linear_max: 0.80
+        theta_min: -1.0
+        theta_max: 1.0
       reverse:
         points: "[[0.00, 0.19], [0.00, -0.19], [-0.17, -0.19], [-0.17, 0.19]]"
         linear_min: -0.31
         linear_max: -0.01
-        theta_min: -0.36
-        theta_max: 0.36
+        theta_min: -0.45
+        theta_max: 0.45
+      reverse_fast:
+        points: "[[0.00, 0.19], [0.00, -0.19], [-0.30, -0.19], [-0.30, 0.19]]"
+        linear_min: -0.80
+        linear_max: -0.31
+        theta_min: -1.0
+        theta_max: 1.0
       stopped:
         # A nonzero command immediately selects forward or reverse. This small
         # fallback protects the footprint while no directional command exists.
