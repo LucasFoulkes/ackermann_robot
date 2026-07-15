@@ -98,7 +98,13 @@ controller_server:
       regulated_linear_scaling_min_radius: 1.40  # slow EARLY in curves;
       # fixed on purpose (see launch comment): cornering speed is comfort,
       # not capability. Proven tight-curve speed is ~0.17 m/s.
-      regulated_linear_scaling_min_speed: 0.12
+      # 0.12 was the STRAIGHT-LINE sustain floor; under full steering
+      # drag the real floor is higher, so curve regulation was ordering
+      # the plant to stall (2026-07-15 18:24 session: 8/8 stalls
+      # mid-curve at commanded 0.12-0.13, zero stalls elsewhere). 0.20
+      # keeps curves inside the drivetrain's drag-loaded sustain band;
+      # cornering stays slow via the 1.40 comfort radius.
+      regulated_linear_scaling_min_speed: 0.20
       cost_scaling_dist: 0.30
       cost_scaling_gain: 1.0
       inflation_cost_scaling_factor: 3.0
