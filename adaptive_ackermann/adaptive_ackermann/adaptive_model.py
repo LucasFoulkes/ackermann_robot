@@ -13,9 +13,17 @@ def angle_difference(a, b):
 
 def compose_preview_curvature(rpp_curvature, current_path_curvature,
                               future_path_curvature, confidence,
-                              maximum_curvature):
-    """Lead path feed-forward while preserving RPP's feedback component."""
+                              maximum_curvature, feedback_cap=None):
+    """Lead path feed-forward while bounding RPP's feedback component.
+
+    The feedback term is RPP's error correction on top of what the path
+    itself asks for. A loop with ~0.4 s of measured delay cannot stably
+    close large corrections — uncapped, they limit-cycle (the S-snake on
+    straights). The cap bounds error response; path-following authority
+    (the feed-forward term) stays at full executable curvature."""
     feedback = rpp_curvature - current_path_curvature
+    if feedback_cap is not None:
+        feedback = clamp(feedback, -abs(feedback_cap), abs(feedback_cap))
     future_command = future_path_curvature + feedback
     blended = rpp_curvature + confidence * (future_command - rpp_curvature)
     return clamp(blended, -maximum_curvature, maximum_curvature)

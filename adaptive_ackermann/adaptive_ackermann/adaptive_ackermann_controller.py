@@ -214,6 +214,10 @@ class AdaptiveAckermannController(Node):
             # The pure-pursuit feed-forward lead is retained only for legacy
             # controller experiments and must stay off with MPPI.
             'apply_path_preview_compensation': False,
+            # Max curvature RPP's error-feedback may add on top of the
+            # path's own demand. Sized to the MEASURED ~0.4 s loop delay:
+            # larger corrections limit-cycle instead of converging.
+            'steering_feedback_cap_1pm': 0.40,
             # MPPI chose only ~0.22 1/m for a certified 1.15 1/m reverse arc
             # in the 11:17 drive. Supply the missing same-sign path curvature,
             # while preserving stronger/opposite MPPI recovery corrections.
@@ -1200,7 +1204,9 @@ class AdaptiveAckermannController(Node):
             self.p['rpp_min_lookahead_m'], self.p['rpp_max_lookahead_m'])
         current_path_curvature = geometry.pure_pursuit_curvature(
             index, direction_sign, lookahead)
-        feedback = rpp_curvature - current_path_curvature
+        raw_feedback = rpp_curvature - current_path_curvature
+        cap = self.p['steering_feedback_cap_1pm']
+        feedback = clamp(raw_feedback, -cap, cap)
         # Measured per-direction lag (2026-07-11 step experiment) replaces the
         # online delay estimate; the estimator still runs for telemetry.
         delay = self._steering_lag(direction, target_speed)
@@ -1229,12 +1235,13 @@ class AdaptiveAckermannController(Node):
             blend if self.p['apply_path_preview_compensation'] else 0.0)
         compensated = compose_preview_curvature(
             rpp_curvature, current_path_curvature, preview_curvature,
-            applied_blend, self.p['maximum_curvature_1pm'])
+            applied_blend, self.p['maximum_curvature_1pm'],
+            feedback_cap=cap)
         assist_active = False
         result.update({
             'path_curvature_now_1pm': current_path_curvature,
             'path_curvature_preview_1pm': preview_curvature,
-            'rpp_feedback_curvature_1pm': feedback,
+            'rpp_feedback_curvature_1pm': raw_feedback,
             'preview_distance_m': preview_distance,
             'preview_horizon_s': horizon,
             'preview_blend': applied_blend,

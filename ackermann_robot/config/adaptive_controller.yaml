@@ -133,7 +133,19 @@ adaptive_ackermann_controller:
     steering_lag_time_reverse_s: 0.168
     steering_lag_distance_forward_m: 0.0
     steering_lag_distance_reverse_m: 0.033
-    apply_path_preview_compensation: false
+    # ODAAC-style feedforward-dominant steering (enabled 2026-07-15): path
+    # curvature at a lag-compensated preview point is the primary command;
+    # RPP's error feedback is CAPPED (below) because the measured closed
+    # loop has ~0.4 s delay and cannot stably close large corrections —
+    # uncapped it limit-cycled (the S-snake on straights, three lookahead
+    # tunings couldn't kill it).
+    apply_path_preview_compensation: true
+    steering_feedback_cap_1pm: 0.40
+    # Mirror the ACTUAL RPP lookahead config (nav2_odom_experiment.yaml)
+    # so path_curvature_now matches what RPP itself follows.
+    rpp_lookahead_time_s: 1.2
+    rpp_min_lookahead_m: 0.36
+    rpp_max_lookahead_m: 0.75
     apply_path_curvature_floor: false
     path_curvature_floor_max_lateral_error_m: 0.20
     path_curvature_floor_max_heading_error_rad: 0.50
@@ -169,7 +181,9 @@ adaptive_ackermann_controller:
     path_inversion_tolerance_m: 0.12
     cusp_guard_entry_m: 0.18
     cusp_guard_departure_m: 0.08
-    enable_external_path_interpretation: false
+    # Required by the preview feedforward: interprets the dispatcher's
+    # exact one-direction segment path (/controller_segment_plan).
+    enable_external_path_interpretation: true
     # Same measured transform and rectangle used by Xacro/Nav2.
     lidar_x_m: 0.237
     lidar_y_m: 0.0
