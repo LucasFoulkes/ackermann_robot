@@ -21,7 +21,15 @@ adaptive_ackermann_controller:
     # the measured sweet spot. The
     # actuator maximum above stays a hard clamp with headroom so the
     # published speed limit, not the clamp, shapes cruise.
-    navigation_speed_limit_mps: 0.50
+    # HYBRID 2026-07-15: era-operating-point test (branch pre-tracker-test,
+    # a69a15b code) drove dramatically calmer: xte_p90 1.7 cm, launches
+    # pop 0.23, 4 aborts/4 min, zero clear-spirals — NOT because the old
+    # code was better (same slew limiter, same saturation band, same BT
+    # clears present) but because 0.40 cruise kept errors inside pure
+    # pursuit's linear band. Run ALL the defect fixes at that proven
+    # operating point; the steering-loop budget (controller) now EARNS
+    # speed back as the measured delay improves.
+    navigation_speed_limit_mps: 0.40
     # Overspeed fault tripwire: launch margin above the 0.60 cruise.
     maximum_measured_speed_mps: 0.75
     # Recorded neutral-stop events gave a 25th-percentile deceleration of

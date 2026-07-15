@@ -129,6 +129,11 @@ class AdaptiveAckermannController(Node):
             # sustain floor is the starting point, cruise is reached in
             # ~0.6 s at 0.8. Zero disables.
             'launch_target_ramp_mps2': 0.8,
+            # Steering-loop speed budget: v_max = fraction * L_min / tau.
+            # fraction 0.5 is the 2*v*tau pure-pursuit stability margin;
+            # sensing lag covers MOLA + odometry filtering (measured ~0.15).
+            'steering_budget_fraction': 0.5,
+            'steering_budget_sensing_lag_s': 0.15,
             # EW-variance reference for breakaway alpha damping: variance
             # equal to this (~0.1 effort of scatter) halves the rate.
             'breakaway_variance_reference': 0.01,
@@ -2465,6 +2470,22 @@ class AdaptiveAckermannController(Node):
         if self.achievable_ratio < 0.85:
             limit = max(self.p['weak_plant_min_limit_mps'],
                         limit * clamp(self.achievable_ratio * 1.15, 0.4, 1.0))
+        # Steering-loop speed budget (2026-07-15, the week's lesson made
+        # policy): every command-side pathology appeared when cruise
+        # outran the loop. Pure-pursuit stability needs the lookahead
+        # floor to cover ~2 * v * total loop delay, so invert it:
+        #   v_max = fraction * L_min / (tau_hat + sensing)
+        # tau_hat is the ONLINE delay estimate (follows battery, servo
+        # load, the slew fix), sensing covers odometry latency + filter.
+        # Self-lowers when the loop degrades, self-raises as it improves
+        # — cruise is EARNED from measurement, not configured ambition.
+        if self.delay_estimator.confidence >= 0.5:
+            loop_tau = (self.estimated_steering_delay_s +
+                        self.p['steering_budget_sensing_lag_s'])
+            budget = (self.p['steering_budget_fraction'] *
+                      self.p['rpp_min_lookahead_m'] / max(loop_tau, 0.05))
+            limit = min(limit, max(budget,
+                                   self.p['weak_plant_min_limit_mps']))
         speed_limit = SpeedLimit(); speed_limit.header.stamp = self.get_clock().now().to_msg()
         speed_limit.percentage = False; speed_limit.speed_limit = max(.08, limit)
         self.speed_limit_pub.publish(speed_limit)

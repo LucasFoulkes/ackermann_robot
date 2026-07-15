@@ -64,7 +64,7 @@ controller_server:
       # proxy prevents its Jazzy cusp-pruning defect by sending one direction
       # segment at a time.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.50
+      desired_linear_vel: 0.40  # hybrid: era operating point, see adaptive_controller.yaml
       lookahead_dist: 0.35
       # The floor bounds worst-case feedback gain (kappa = 2y/L^2), and the
       # MEASURED closed-loop delay is ~0.40 s (cmd-vs-measured curvature
