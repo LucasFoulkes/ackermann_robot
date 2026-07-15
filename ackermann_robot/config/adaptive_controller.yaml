@@ -170,13 +170,14 @@ adaptive_ackermann_controller:
     # loop has ~0.4 s delay and cannot stably close large corrections —
     # uncapped it limit-cycled (the S-snake on straights, three lookahead
     # tunings couldn't kill it).
-    apply_path_preview_compensation: true
+    # SCAFFOLDING DELETED (hybrid A/B, 2026-07-15): the preview blend was
+    # built to out-run a 0.4 s loop delay that the 2.0/s slew limiter was
+    # manufacturing. With the limiter fixed (8.0/s), raw RPP at the 0.40
+    # operating point tracked 1.7 cm xte_p90; preview ON tracked 2.9 cm
+    # and fired the geometry guard 93x in one run — it now only ADDS
+    # projection noise. Interpretation stays on (probe gating, telemetry).
+    apply_path_preview_compensation: false
     steering_feedback_cap_1pm: 0.40
-    # Mirror the ACTUAL RPP lookahead config (nav2_odom_experiment.yaml)
-    # so path_curvature_now matches what RPP itself follows.
-    rpp_lookahead_time_s: 1.2
-    rpp_min_lookahead_m: 0.36
-    rpp_max_lookahead_m: 0.75
     apply_path_curvature_floor: false
     path_curvature_floor_max_lateral_error_m: 0.20
     path_curvature_floor_max_heading_error_rad: 0.50
@@ -224,7 +225,7 @@ adaptive_ackermann_controller:
     footprint_half_width_m: 0.16
     # Must match the RPP parameters in nav2_odom_experiment.yaml.
     rpp_lookahead_time_s: 1.5
-    rpp_min_lookahead_m: 0.30
+    rpp_min_lookahead_m: 0.35
     rpp_max_lookahead_m: 0.75
     runtime_model_path: "~/.robot/adaptive_ackermann_runtime.yaml"
     drive_log_directory: "~/.robot/drive_logs"

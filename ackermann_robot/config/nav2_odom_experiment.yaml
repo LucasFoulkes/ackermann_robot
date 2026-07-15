@@ -75,13 +75,13 @@ controller_server:
       # budget across the slow zone; cost = mild chording on crawl arcs.
       # Proper fix queued: feedforward-dominant preview + capped RPP
       # feedback sized to the measured delay.
-      min_lookahead_dist: 0.36
+      min_lookahead_dist: 0.35  # era value; the 0.22-0.36 saga was slew-delay scaffolding
       max_lookahead_dist: 0.75
       # 1.5 -> 1.2 with velocity-scaled CURVATURE lookahead re-enabled below:
       # crawl-speed arcs get 0.22-0.30 m (steer-early, the 118-leg chording
       # fix), cruise gets 0.60-0.75 m (the good era never snaked on
       # straights). One mechanism, both regimes.
-      lookahead_time: 1.2
+      lookahead_time: 1.5  # era value restored: 1.2 was an anti-delay patch
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true
       # 0.14 sat AT the measured stall floor (~0.12): terminal approaches
