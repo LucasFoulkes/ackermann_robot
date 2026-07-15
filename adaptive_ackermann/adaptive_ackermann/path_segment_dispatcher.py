@@ -481,8 +481,16 @@ class PathSegmentDispatcher(Node):
             # the watchdog instead of cancelling a segment the weak pack is
             # still winning. The controller's behavioral pack-exhaustion
             # latch remains the terminal backstop.
+            # planned_stop and direction_change are as legitimately busy
+            # as startup: a segment beginning with planned-stop wait (2 s)
+            # + direction settle (0.5 s) + reverse double-tap + breakaway
+            # burns 5-6 s before 5 cm of progress — goals were dying of
+            # 'no chronological progress' with NO obstacle because the
+            # patience factor didn't cover those states (2026-07-15).
             patience = (self.launch_patience_factor
-                        if self.controller_state in ('startup', 'recovery')
+                        if self.controller_state in (
+                            'startup', 'recovery', 'planned_stop',
+                            'direction_change')
                         else 1.0)
             reason = segment_abort_reason(
                 now, metric['length'], metric['last_progress_at'],

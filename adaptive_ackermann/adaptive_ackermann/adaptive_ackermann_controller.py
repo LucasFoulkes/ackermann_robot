@@ -1275,6 +1275,19 @@ class AdaptiveAckermannController(Node):
             preview_curvature = geometry.pure_pursuit_curvature(
                 preview_index, direction_sign, lookahead)
             candidate = preview_curvature + feedback
+        # Degenerate-projection guard: chord math at kinks/segment ends
+        # can read path curvature beyond anything Smac can plan (observed:
+        # rpp -0.5 vs path_now +2.22 -> commanded +1.31 = a hard
+        # WRONG-DIRECTION jerk). A geometrically impossible path signal is
+        # an artifact — use raw RPP for this tick.
+        geometry_cap = max(self._curvature_caps()) + 0.10
+        if (abs(current_path_curvature) > geometry_cap or
+                abs(preview_curvature) > geometry_cap):
+            result['steering_command_source'] = 'rpp_geometry_guard'
+            result['path_curvature_now_1pm'] = current_path_curvature
+            result['path_curvature_preview_1pm'] = preview_curvature
+            self.preview = result
+            return rpp_curvature
         # Continuous confidence blend ON PURPOSE: the (1-blend) share of
         # raw RPP is the guardrail when the controller's own path
         # projection is wrong (merged-segment kinks, index snaps). The
