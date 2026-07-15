@@ -494,6 +494,7 @@ class AdaptiveAckermannController(Node):
         self.cmd_sign_since = 0.0
         self.rolling_since = 0.0
         self.rolling_entry_speed = 0.0
+        self.last_commanded_curvature = 0.0
         self.feedback_ema = 0.0
         # ODAAC steal #4: every gated-out learning sample is counted by
         # reason; published at 1 Hz in /controller/debug. Rejection
@@ -894,7 +895,8 @@ class AdaptiveAckermannController(Node):
             angle = msg.angle_min + index * msg.angle_increment
             external, front_clearance, rear_clearance = scan_point_clearance(
                 distance, angle, lidar_x, lidar_y, lidar_yaw,
-                front_x, rear_x, half_width)
+                front_x, rear_x, half_width,
+                curvature=self.last_commanded_curvature)
             if not external:
                 continue
             valid.append(distance)
@@ -1575,6 +1577,10 @@ class AdaptiveAckermannController(Node):
                  (self.direction == 'forward') != (sign_now > 0))):
             stop_reason = 'direction settle'
         rpp_curvature = curvature
+        # Clearance corridor bends with the commanded arc; hold the last
+        # driving curvature (decay to straight when not commanding).
+        self.last_commanded_curvature = (
+            curvature if abs(target) > .01 else 0.0)
         if stop_reason or abs(self.speed) > self.p['maximum_measured_speed_mps']:
             self.fault = stop_reason or 'measured overspeed'; self.state = 'stopped'
             self.direction = None; self.low_samples = self.limit_dwell = 0

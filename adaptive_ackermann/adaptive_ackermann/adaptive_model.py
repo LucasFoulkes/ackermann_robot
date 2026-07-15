@@ -452,15 +452,24 @@ def learned_planner_curvature(physical_curvature, utilization,
 
 
 def scan_point_clearance(distance, scan_angle, lidar_x, lidar_y, lidar_yaw,
-                         front_x, rear_x, half_width):
-    """Transform one scan point and return (external, front, rear clearance)."""
+                         front_x, rear_x, half_width, curvature=0.0):
+    """Transform one scan point and return (external, front, rear clearance).
+
+    The clearance corridor BENDS with the commanded arc (parabolic
+    small-angle approximation y = kappa*x^2/2, valid within the ~1 m
+    stopping horizon). A straight corridor stopped the robot for walls
+    its arc was steering AWAY from — with maneuver-tight planning the
+    nose sweeps past close obstacles constantly (2026-07-15: 'forward
+    obstacle stop' at 0.23 m while turning kappa 1.3 away from a wall).
+    curvature=0 preserves the original straight corridor exactly."""
     base_angle = scan_angle + lidar_yaw
     x = lidar_x + distance * math.cos(base_angle)
     y = lidar_y + distance * math.sin(base_angle)
     if rear_x <= x <= front_x and abs(y) <= half_width:
         return False, None, None
-    front = x - front_x if abs(y) <= half_width and x > front_x else None
-    rear = rear_x - x if abs(y) <= half_width and x < rear_x else None
+    lateral = y - 0.5 * curvature * x * x
+    front = x - front_x if abs(lateral) <= half_width and x > front_x else None
+    rear = rear_x - x if abs(lateral) <= half_width and x < rear_x else None
     return True, front, rear
 
 
