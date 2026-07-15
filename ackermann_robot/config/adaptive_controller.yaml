@@ -34,7 +34,11 @@ adaptive_ackermann_controller:
     # 1.40 RIGHT(-)). Positive unlocks the strong left side at 80% of
     # measured; negative 0.0 = keep the symmetric conservative pipeline
     # (yaml nominal below + launch-time RLS shrink) for the weak side.
-    maximum_curvature_positive_1pm: 1.60
+    # Both 0.0 (symmetric) until the preview projection is trustworthy:
+    # unlocking 1.60 on the left while feedforward could mis-project
+    # amplified errors (2026-07-15 regression session). Re-promote from
+    # data, live-tunable.
+    maximum_curvature_positive_1pm: 0.0
     maximum_curvature_negative_1pm: 0.0
     maximum_curvature_1pm: 1.35   # promoted 2026-07-14 from MEASURED full-lock
     # capability (drill circles: kappa 1.99 LEFT / 1.40 RIGHT); 1.35 sits just

@@ -227,11 +227,6 @@ class AdaptiveAckermannController(Node):
             # path's own demand. Sized to the MEASURED ~0.4 s loop delay:
             # larger corrections limit-cycle instead of converging.
             'steering_feedback_cap_1pm': 0.40,
-            # Low-pass on the (capped) feedback term, time constant sized
-            # to the measured ~0.4 s loop delay: bang-bang flips faster
-            # than the loop can observe are what sustain the residual
-            # limit cycle. DC gain is 1 — steady offsets still converge.
-            'steering_feedback_tau_s': 0.4,
             # MPPI chose only ~0.22 1/m for a certified 1.15 1/m reverse arc
             # in the 11:17 drive. Supply the missing same-sign path curvature,
             # while preserving stronger/opposite MPPI recovery corrections.
@@ -1243,11 +1238,7 @@ class AdaptiveAckermannController(Node):
             index, direction_sign, lookahead)
         raw_feedback = rpp_curvature - current_path_curvature
         cap = self.p['steering_feedback_cap_1pm']
-        tick_dt = 1.0 / self.p['control_rate_hz']
-        alpha = tick_dt / (self.p['steering_feedback_tau_s'] + tick_dt)
-        self.feedback_ema += alpha * (
-            clamp(raw_feedback, -cap, cap) - self.feedback_ema)
-        feedback = self.feedback_ema
+        feedback = clamp(raw_feedback, -cap, cap)
         # Measured per-direction lag (2026-07-11 step experiment) replaces the
         # online delay estimate; the estimator still runs for telemetry.
         delay = self._steering_lag(direction, target_speed)
@@ -1272,12 +1263,11 @@ class AdaptiveAckermannController(Node):
             preview_curvature = geometry.pure_pursuit_curvature(
                 preview_index, direction_sign, lookahead)
             candidate = preview_curvature + feedback
-        # All-or-nothing above the trust threshold: a partial blend leaks
-        # (1 - blend) of UNCAPPED RPP into the command — at 0.87 that was
-        # +-0.17 of the residual snake. Below threshold, raw RPP (the
-        # safe fallback when the model is unknown) as before.
-        if blend >= 0.5:
-            blend = 1.0
+        # Continuous confidence blend ON PURPOSE: the (1-blend) share of
+        # raw RPP is the guardrail when the controller's own path
+        # projection is wrong (merged-segment kinks, index snaps). The
+        # 2026-07-15 all-or-nothing experiment removed it and the robot
+        # got WORSE (couldn't hold a line, abort churn) — reverted.
         applied_blend = (
             blend if self.p['apply_path_preview_compensation'] else 0.0)
         future_command = preview_curvature + feedback
