@@ -6,28 +6,33 @@
              second reset cusp chronology and produced 24 incompatible plans
              during the 11:33 regression. FollowPath is now a proxy that owns
              the committed path and dispatches one direction segment at a time. -->
+        <!-- NO costmap clearing anywhere in this tree (2026-07-15). The
+             clears were Nav2 default-BT heritage for ghost-obstacle
+             sensors. With a 10 Hz lidar and rolling costmaps, stale cells
+             raytrace away continuously — clearing adds nothing and marks
+             the costmap NOT CURRENT, which makes controller_server wait
+             in a SILENT loop before computing: the clear->mute-RPP->
+             abort->retry->clear death spiral (7 clears in one failing
+             session). Planning retries just wait briefly instead. -->
         <GoalUpdatedController>
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
-            <ClearEntireCostmap name="ClearGlobal" service_name="global_costmap/clear_entirely_global_costmap"/>
+            <Wait wait_duration="0.5"/>
           </RecoveryNode>
         </GoalUpdatedController>
         <!-- A failed committed path must leave this pipeline immediately.
              Retrying FollowPath here replayed the old direction segments from
              their original start after the robot had moved. The outer recovery
-             clears both costmaps; resetting this pipeline then computes one
+             waits (or backs up); resetting this pipeline then computes one
              fresh path from the current pose. -->
         <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
       </PipelineSequence>
       <ReactiveFallback name="AckermannRecovery">
         <GoalUpdated/>
         <RoundRobin>
-          <Sequence>
-            <ClearEntireCostmap name="ClearLocalRecovery" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <ClearEntireCostmap name="ClearGlobalRecovery" service_name="global_costmap/clear_entirely_global_costmap"/>
-          </Sequence>
           <!-- Give a crossing/moving obstacle time to clear before commanding
-               any recovery motion. Every retry recomputes from the live pose. -->
+               any recovery motion. Every retry recomputes from the live pose.
+               (Costmap clears removed — see note above.) -->
           <Wait wait_duration="1.0"/>
           <BackUp backup_dist="0.25" backup_speed="0.10" error_code_id="{backup_code_id}"/>
         </RoundRobin>
