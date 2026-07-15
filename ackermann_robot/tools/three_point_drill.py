@@ -78,6 +78,48 @@ class Drill(Node):
         while self.pose is None:
             rclpy.spin_once(self, timeout_sec=0.2)
 
+    def circle(self, side):
+        """Forward-only full-lock circle: measures true max-lock curvature
+        per side even on a weak pack (reverse thrust not required)."""
+        self.wait_pose()
+        origin = self.pose
+        start_yaw = origin[2]
+        rotated = 0.0
+        last_yaw = start_yaw
+        last_motion = time.monotonic()
+        t0 = last_motion
+        kappas = []
+        max_footprint = 0.0
+        print(f'--- full-lock circle ({"LEFT" if side > 0 else "RIGHT"}), '
+              f'360 deg ---')
+        while abs(rotated) < 2.0 * math.pi:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            now = time.monotonic()
+            self.command(CRAWL, side * MAX_KAPPA)
+            max_footprint = max(max_footprint, math.hypot(
+                self.pose[0] - origin[0], self.pose[1] - origin[1]))
+            if abs(self.speed) > 0.04:
+                last_motion = now
+                if abs(self.speed) > 0.08:
+                    kappas.append(abs(self.yaw_rate / self.speed))
+            if now - last_motion > 4.0 and now - t0 > 3.0:
+                print('  BLOCKED (no motion 4 s) — pack or obstacle')
+                break
+            if now - t0 > 90.0:
+                print('  timeout 90 s')
+                break
+            rotated += wrap(self.pose[2] - last_yaw)
+            last_yaw = self.pose[2]
+        self.command(0.0, 0.0)
+        if kappas:
+            k = sorted(kappas)[len(kappas) // 2]
+            print(f'  => {math.degrees(rotated):+.0f} deg, measured '
+                  f'full-lock |kappa| {k:.2f} (radius {1.0 / max(k, .01):.2f}'
+                  f' m), circle diameter ~{2 * max_footprint:.2f} m, '
+                  f'{time.monotonic() - t0:.0f} s')
+        else:
+            print('  => no rolling samples (never reached 0.08 m/s)')
+
     def rotate(self, side):
         """One near-in-place rotation. side=+1 rotates nose left (CCW)."""
         self.wait_pose()
@@ -157,7 +199,8 @@ def set_clamp(value):
 
 
 def main():
-    rotations = int(sys.argv[1]) if len(sys.argv) > 1 else 2
+    numeric = [a for a in sys.argv[1:] if a.isdigit()]
+    rotations = int(numeric[0]) if numeric else 2
     rclpy.init()
     node = Drill()
     # Raise the executable clamp for the drill only (comfort default 1.15
@@ -166,11 +209,17 @@ def main():
         print('cannot raise clamp — is the stack running with the '
               'live-tunable build? aborting.')
         return
+    forward_only = 'fwd' in sys.argv[1:]
     try:
-        for i in range(rotations):
-            side = 1 if i % 2 == 0 else -1
-            node.rotate(side)
-            time.sleep(1.0)
+        if forward_only:
+            for side in (1, -1):
+                node.circle(side)
+                time.sleep(1.0)
+        else:
+            for i in range(rotations):
+                side = 1 if i % 2 == 0 else -1
+                node.rotate(side)
+                time.sleep(1.0)
     except KeyboardInterrupt:
         pass
     finally:
