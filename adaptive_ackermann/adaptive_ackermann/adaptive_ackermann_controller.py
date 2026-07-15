@@ -119,6 +119,10 @@ class AdaptiveAckermannController(Node):
             'effort_scale_process_per_s': 0.0005,
             'effort_scale_boot_sd': 0.10,
             'startup_drop_through_mps': 0.15,
+            # Throttle-target ramp rate after breakaway (m/s per s); the
+            # sustain floor is the starting point, cruise is reached in
+            # ~0.6 s at 0.8. Zero disables.
+            'launch_target_ramp_mps2': 0.8,
             # Steering drag raises breakaway when launching INTO a turn
             # (2026-07-14 follow sessions: 24-37% of curve-commanded time
             # spent stalled; the throttle model is 1-D by measurement, but
@@ -1386,7 +1390,14 @@ class AdaptiveAckermannController(Node):
         if (fresh_odom and self.state == 'rolling'
                 and not self.odom_outlier
                 and abs(self.speed) >= self.p['minimum_sustain_speed_mps']
-                and abs(target) > .01):
+                and abs(target) > .01
+                and now - self.rolling_since > 1.5):
+            # The 1.5 s rolling-age gate is the rollback-attribution fix
+            # (2026-07-14): launch transients, direction flips, and fresh-
+            # pack surges fed applied_error_ema, which benched a HEALTHY
+            # map at every speed era (71k/13k/21k rolled_back ticks) — the
+            # EMA was measuring plant chaos, not map error. Converged
+            # samples measure the plant; transients measure the controller.
             measured_kappa = self.yaw_rate / self.speed
             # Steering-polarity evidence: compare measured curvature against
             # the LEARNED MAP'S OWN PREDICTION for the pulse actually sent
@@ -1612,6 +1623,18 @@ class AdaptiveAckermannController(Node):
                     self.tprobe_samples = []
                     self.tprobe_effort_sum = 0.0
                     self.tprobe_effort_n = 0
+            # Post-launch target ramp: commanding cruise the instant
+            # breakaway confirms was the lunge amplifier — the feedforward
+            # jumps to map(0.6) while the wheels barely roll. Ramp the
+            # throttle target from the sustain floor as rolling matures;
+            # steering and safety gates see the ORIGINAL command.
+            ramp = self.p['launch_target_ramp_mps2']
+            if ramp > 0.0:
+                age = (now - self.rolling_since
+                       if self.state == 'rolling' else 0.0)
+                allowed = self.p['minimum_sustain_speed_mps'] + ramp * age
+                if abs(target) > allowed:
+                    target = math.copysign(allowed, target)
             base = interpolate(self.throttle_maps[direction], abs(target))
             self.learned_throttle_state = 'off'
             self.learned_line_effort = 0.0

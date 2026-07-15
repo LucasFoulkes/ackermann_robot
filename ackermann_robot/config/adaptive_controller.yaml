@@ -66,6 +66,10 @@ adaptive_ackermann_controller:
     # observer confirms motion. Speed units because a fixed offset was worth
     # ~2x more speed in reverse (shallow slope) and caused reverse stalls.
     startup_drop_through_mps: 0.15
+    # Ramp the throttle target from the sustain floor after breakaway
+    # (reaches 0.6 cruise in ~0.6 s): commanding cruise instantly at
+    # breakaway was the launch-lunge amplifier.
+    launch_target_ramp_mps2: 0.8
     # Low-speed intent is executed as bounded pulse-and-coast, not converted
     # into an indefinitely escalating launch. The active dispatcher segment
     # is authoritative for remaining distance.
