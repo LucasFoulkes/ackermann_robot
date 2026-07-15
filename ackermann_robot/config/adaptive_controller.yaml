@@ -128,8 +128,13 @@ adaptive_ackermann_controller:
     probe_clearance_margin_m: 0.30
     probe_min_stop_distance_m: 1.0
     maximum_throttle_trim_effort: 0.125      # was 40 us
-    forward_rolling_min_effort: -0.375       # was 1380 us
-    reverse_rolling_max_effort: 0.50         # raised for 0.6 m/s reverse
+    # FULL authority while rolling (user directive 2026-07-15): a sagging
+    # pack must be allowed to use everything it has before the behavioral
+    # exhaustion path declares defeat. Runaway protection stays with the
+    # overspeed tripwire + obstacle gates, and the PI ramps at
+    # 0.019/odom so this is headroom, not a step.
+    forward_rolling_min_effort: -1.0
+    reverse_rolling_max_effort: 1.0
     # Full declared authority: +/-1 by definition in the effort domain.
     forward_recovery_limit_effort: -1.0
     reverse_recovery_limit_effort: 1.0
