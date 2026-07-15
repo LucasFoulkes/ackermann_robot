@@ -190,7 +190,15 @@ adaptive_ackermann_controller:
     # operating point tracked 1.7 cm xte_p90; preview ON tracked 2.9 cm
     # and fired the geometry guard 93x in one run — it now only ADDS
     # projection noise. Interpretation stays on (probe gating, telemetry).
-    apply_path_preview_compensation: false
+    # Re-enabled 2026-07-15 (third user report of wrong-direction swings
+    # at curve entries): RPP's delayed error feedback swings through sign
+    # (+0.61 -> -1.30 in 2.5 s, 18:50 run). With preview ON the command
+    # follows the COMMITTED PATH's curvature and error feedback may only
+    # add +-0.4 — wrong-way excursions beyond the cap become structurally
+    # impossible. The projection-artifact failure that benched this in
+    # e615b24 is covered by the rpp_geometry_guard (falls back to raw RPP
+    # on geometrically impossible path readings).
+    apply_path_preview_compensation: true
     steering_feedback_cap_1pm: 0.40
     apply_path_curvature_floor: false
     path_curvature_floor_max_lateral_error_m: 0.20
