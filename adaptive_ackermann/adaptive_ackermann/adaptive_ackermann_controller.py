@@ -200,7 +200,7 @@ class AdaptiveAckermannController(Node):
             'maximum_throttle_trim_effort': 0.125, 'forward_rolling_min_effort': -0.375,
             'reverse_rolling_max_effort': 0.4375, 'forward_recovery_limit_effort': -1.0,
             'reverse_recovery_limit_effort': 1.0, 'recovery_step_effort': 0.031,
-            'recovery_limit_dwell_samples': 10, 'steering_slew_per_s': 2.0,
+            'recovery_limit_dwell_samples': 10, 'steering_slew_per_s': 8.0,
             'steering_slowdown_error_effort': 0.06,
             'steering_learning_min_speed_mps': .10,
             'steering_identification_window_s': .55,

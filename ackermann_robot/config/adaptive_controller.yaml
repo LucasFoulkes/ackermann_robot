@@ -122,7 +122,15 @@ adaptive_ackermann_controller:
     reverse_recovery_limit_effort: 1.0
     recovery_step_effort: 0.031              # was 10 us
     recovery_limit_dwell_samples: 10
-    steering_slew_per_s: 2.0                 # was 1000 us/s (~500 us span)
+    # 2.0 was the u-s era's 1000 us/s carried over unvalidated — 4-6x
+    # SLOWER than the servo hardware (RC steering servo: full sweep in
+    # 0.15-0.25 s = 8-13 effort/s). A rate limiter inside a feedback
+    # loop adds amplitude-dependent phase lag (aerospace: category-II
+    # PIO) — it manufactured ~0.2 s of the measured 0.4 s closed-loop
+    # delay and drove the S-snake that three lookahead tunings and the
+    # preview restructure were scaffolding for. 8.0 = hardware-class
+    # speed with margin; re-measure steering lag after floor test.
+    steering_slew_per_s: 8.0
     steering_slowdown_error_effort: 0.06     # was 30 us
     steering_learning_min_speed_mps: 0.10
     # Continuous identification windows used during ordinary Nav2 goals.
