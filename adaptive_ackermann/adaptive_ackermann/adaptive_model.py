@@ -37,6 +37,13 @@ def isotonic_points(points):
     projected = []
     for value, count in merged:
         projected.extend([value] * count)
+    # Pooling makes violators EQUAL — but equal y values invert into
+    # duplicate x values, and interpolation on duplicates divides by
+    # zero (crashed the controller 2026-07-15, 40 s into a session).
+    # Enforce STRICTLY monotonic output.
+    for i in range(1, len(projected)):
+        if projected[i] <= projected[i - 1]:
+            projected[i] = projected[i - 1] + 1e-6
     changed = any(abs(a - b) > 1e-9 for a, b in zip(ys, projected))
     return ([(x, sign * y) for (x, _), y in zip(pts, projected)], changed)
 

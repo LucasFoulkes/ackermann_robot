@@ -54,7 +54,13 @@ def interpolate(points, x):
         for a, b in zip(points, points[1:]):
             if a[0] <= x <= b[0]:
                 break
-    fraction = (x - a[0]) / (b[0] - a[0])
+    # Duplicate x knots (e.g. an inverted map with pooled values) must
+    # degrade to a step, never divide by zero: this exact division
+    # killed the controller process mid-drive on 2026-07-15.
+    span = b[0] - a[0]
+    if span <= 0.0:
+        return b[1]
+    fraction = (x - a[0]) / span
     return a[1] + fraction * (b[1] - a[1])
 
 
