@@ -502,7 +502,8 @@ class PersonTracker(Node):
                 # time at walking speed. Resurrection zones (earned by a
                 # proven walker) keep their fast single-step semantics.
                 walked_enough = (
-                    track.confirm_travel is not None or
+                    (track.confirm_travel is not None
+                     and track.moving_time >= 0.3) or
                     track.moving_time >= self.p['min_moving_confirm_s'])
                 near_furniture = any(
                     stamp - fs < 600.0 and math.hypot(

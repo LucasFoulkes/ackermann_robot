@@ -89,6 +89,7 @@ class PersonFollower(Node):
     def __init__(self):
         super().__init__('person_follower')
         self.jam_hold_until = 0.0
+        self.reorient_strikes = 0
         self.gear = 1
         self.gear_since = 0.0
         defaults = {
@@ -293,6 +294,18 @@ class PersonFollower(Node):
                     seconds - self.reorient_started
                     > self.p['reorient_timeout_s']):
                 self._cancel_maneuver('route-around timeout')
+                # Strike-out (03:02 loop: jam -> plan -> 10 s timeout ->
+                # jam -> plan..., forever in a tight room): after two
+                # consecutive timeouts the planner has said what it has
+                # to say — hold facing the person and let THEM resolve
+                # the geometry, re-arming when they move.
+                self.reorient_strikes += 1
+                if self.reorient_strikes >= 2:
+                    self.get_logger().info(
+                        'route-around struck out twice: waiting for the '
+                        'person to come around')
+                    self.jam_hold_until = seconds + 8.0
+                    self.reorient_strikes = 0
             elif self.goal_handle is None and not self.goal_pending:
                 self.mode = 'chase'
             else:
@@ -507,6 +520,7 @@ class PersonFollower(Node):
                 # after the backoff while the sighting is still fresh.
                 self.get_logger().info('search aborted; will retry')
             else:
+                self.reorient_strikes = 0
                 self.search_done = True
                 self.get_logger().info(
                     'search finished; holding for the person')
