@@ -29,7 +29,13 @@ adaptive_ackermann_controller:
     # pursuit's linear band. Run ALL the defect fixes at that proven
     # operating point; the steering-loop budget (controller) now EARNS
     # speed back as the measured delay improves.
-    navigation_speed_limit_mps: 0.40
+    # 0.40 -> 0.50 (2026-07-15 follow sessions): the follower cannot
+    # match a walking person under a 0.40 envelope. The steering-loop
+    # BUDGET is the governor now — it computes ~0.51 at the current
+    # measured delay and self-lowers if the loop degrades, which is the
+    # designed mechanism for exactly this decision. Nav cruise stays at
+    # 0.40 via RPP's desired_linear_vel (unchanged).
+    navigation_speed_limit_mps: 0.50
     # Overspeed fault tripwire: launch margin above the 0.60 cruise.
     maximum_measured_speed_mps: 0.75
     # Recorded neutral-stop events gave a 25th-percentile deceleration of

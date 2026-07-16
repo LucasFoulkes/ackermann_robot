@@ -27,6 +27,8 @@ search-at-last-seen. All commands flow through the normal safety chain.
 
 import math
 
+import json
+
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
@@ -34,6 +36,8 @@ from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry  # person topic carries velocity too
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import String
 
 
 def yaw_from_quaternion(q):
@@ -46,6 +50,19 @@ def wrap(angle):
 
 
 class PersonFollower(Node):
+    def _limits(self, msg):
+        try:
+            limits = json.loads(msg.data)
+            kappa = float(limits['max_curvature_1pm'])
+        except (ValueError, KeyError, TypeError):
+            return
+        if kappa > 0.2 and abs(kappa - self.p['max_curvature_1pm']) > 1e-3:
+            self.p['max_curvature_1pm'] = kappa
+            self.p['min_turn_radius_m'] = 1.0 / kappa
+            self.get_logger().info(
+                f'capability update from controller: kappa {kappa:.2f} '
+                f'(min turn radius {1.0 / kappa:.2f} m)')
+
     def __init__(self):
         super().__init__('person_follower')
         defaults = {
@@ -70,7 +87,10 @@ class PersonFollower(Node):
             # beta 0.4 allowed ~0.39 m/s at full lock; proven tight-curve
             # tracking speed is ~0.17-0.20 (same regression as RPP's
             # regulated radius). 1.5 gives ~0.20 at |kappa|=1.15.
-            'beta': 1.5,
+            # 1.5 collapsed speed to ~0.26 at moderate curvature — with
+            # the 0.40 envelope, falling behind a walking person was
+            # arithmetic (user-observed). 1.0 keeps graceful slowdown.
+            'beta': 1.0,
             'lambda': 2.0,
             # Geometric mode trigger: minimum radius of a single forward
             # arc that counts as 'reachable' (chassis limit ~0.87 m at
@@ -129,6 +149,14 @@ class PersonFollower(Node):
         self.create_subscription(Odometry, self.p['person_topic'],
                                  self._person, 10)
         self.create_subscription(Odometry, '/odom', self._odom, 20)
+        # Live capability (user: 'it is not learning that it can turn
+        # more'): the controller PUBLISHES its learned executable limits;
+        # hand-frozen copies here went stale the day capability was
+        # promoted (1.15 vs executable 1.30). Latched topic.
+        limit_qos = QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(
+            String, '/controller/limits', self._limits, limit_qos)
         self.command_pub = self.create_publisher(
             Twist, self.p['command_topic'], 10)
         self.navigator = ActionClient(self, NavigateToPose,

@@ -85,6 +85,15 @@ class Track:
         # it at +-3 cm made tracks visibly jumpy; +-12 cm averages strides.
         r = np.eye(2) * 0.12 ** 2
         innovation = np.array([zx, zy]) - h @ self.state
+        # Teleport gate (2026-07-15, chairs-around-a-table): cluster
+        # association SLIDES across furniture legs as a person walks
+        # past — the track 'travels' without anything moving and a chair
+        # inherits a confirmed identity. A live track cannot jump more
+        # than a walker moves in one frame; the allowance grows with
+        # missed frames so a fast walker re-acquires after occlusion.
+        if float(np.linalg.norm(innovation)) > 0.30 + 0.15 * self.missed:
+            self.missed += 1
+            return False
         s = h @ self.cov @ h.T + r
         k = self.cov @ h.T @ np.linalg.inv(s)
         self.state = self.state + k @ innovation
@@ -102,6 +111,7 @@ class Track:
                 self.last_moving = stamp
         self.last_update = stamp
         self.missed = 0
+        return True
 
     @property
     def speed(self):
@@ -384,10 +394,12 @@ class PersonTracker(Node):
                                candidates[i]['y'] - track.state[1])
                 if d < best_d:
                     best, best_d = i, d
-            if best is not None:
+            if best is not None and track.update(
+                    candidates[best]['x'], candidates[best]['y'],
+                    stamp, trust_motion=self.ego_calm):
+                # claim only on ACCEPTED update: a rejected teleport must
+                # leave the cluster available for birth/other tracks
                 unclaimed.remove(best)
-                track.update(candidates[best]['x'], candidates[best]['y'],
-                             stamp, trust_motion=self.ego_calm)
                 needed = (track.confirm_travel
                           if track.confirm_travel is not None
                           else self.p['min_travel_confirm_m'])
