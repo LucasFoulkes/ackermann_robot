@@ -81,7 +81,7 @@ class Track:
             # forever (classic CV-Kalman runaway).
             self.state[2:] *= 0.5
 
-    def update(self, zx, zy, stamp, trust_motion=True):
+    def update(self, zx, zy, stamp, trust_motion=True, ego_slack=0.0):
         h = np.zeros((2, 4))
         h[0, 0] = h[1, 1] = 1.0
         # The 'measurement' is the leg centroid: gait swings it 10-20 cm
@@ -98,7 +98,16 @@ class Track:
         # 0.20: tighter than chair-leg spacing (~0.3-0.5 m) and looser
         # than a walker's per-frame motion (~0.15 m at 10 Hz) — slides
         # across furniture are rejected, humans are not.
-        if float(np.linalg.norm(innovation)) > 0.20 + 0.15 * self.missed:
+        # ego_slack (2026-07-16 churn fix): while the ROBOT moves, scan
+        # smear and ICP micro-shifts displace the person's cluster in
+        # the odom frame by up to ~(v + r*w)*scan_period. The calm-robot
+        # gate rejected those frames, the track starved through a
+        # maneuver and re-birthed as a fresh id (1->6->7->9 in 30 s,
+        # 14:44 run) - every rebirth costs re-confirmation and follower
+        # hesitation. The gate widens by exactly what ego motion can
+        # fake, and only while it is actually moving.
+        if float(np.linalg.norm(innovation)) > (0.20 + ego_slack
+                                                + 0.15 * self.missed):
             self.missed += 1
             return False
         s = h @ self.cov @ h.T + r
@@ -555,6 +564,12 @@ class PersonTracker(Node):
             dt = max(0.0, min(0.5, stamp - track.last_update))
             track.predict(dt)
         gate = self.p['association_gate_m']
+        # Ego slack: apparent displacement the robot's own motion can
+        # produce within one scan (translation + rotation lever arm at
+        # a nominal 2.5 m person range), plus margin for ICP shift.
+        ego_slack = min(0.35, (abs(self.robot_speed)
+                               + 2.5 * abs(self.robot_yaw_rate)) * 0.15)
+        gate += ego_slack
         # Followed-track identity persistence (2026-07-15): a walking
         # person occluded for a few frames left the gate, re-birthed as
         # a new id, and the old id coasted behind them as a confirmed
@@ -603,7 +618,8 @@ class PersonTracker(Node):
             if best is not None and track.update(
                     candidates[best]['x'], candidates[best]['y'],
                     stamp, trust_motion=(self.ego_calm and
-                                         stamp >= track.shadowed_until)):
+                                         stamp >= track.shadowed_until),
+                    ego_slack=ego_slack):
                 # claim only on ACCEPTED update: a rejected teleport must
                 # leave the cluster available for birth/other tracks
                 unclaimed.remove(best)
@@ -677,8 +693,14 @@ class PersonTracker(Node):
         # within ~2 s of walking; 15 s without sustained motion is a
         # thing, not a person. By then its cells are static, so it
         # cannot re-birth (birth needs dynamic evidence).
+        # While the robot maneuvers, association is degraded through no
+        # fault of the person - let tracks coast longer instead of dying
+        # mid-maneuver (ghosts gain nothing: motion evidence is frozen
+        # while ego is not calm).
+        timeout = self.p['track_timeout_s'] * (1.0 if self.ego_calm
+                                               else 2.0)
         self.tracks = [t for t in self.tracks
-                       if stamp - t.last_update < self.p['track_timeout_s']
+                       if stamp - t.last_update < timeout
                        and not (not t.confirmed
                                 and stamp - t.born > 15.0
                                 and t.moving_time
@@ -691,14 +713,25 @@ class PersonTracker(Node):
         # twin). Two confirmed tracks this close are one person: keep
         # the freshest, inherit followership.
         keep = []
-        for t in sorted(self.tracks, key=lambda t: stamp - t.last_update):
+        # Iterate senior-first: the OLDEST confirmed identity survives a
+        # twin merge (it carries the referee score, travel history and
+        # followership); it adopts the younger twin's kinematic state so
+        # position stays fresh. Keeping the freshest instead executed
+        # the endorsed identity every time a gait blip minted a twin.
+        for t in sorted(self.tracks, key=lambda t: t.born):
             dup = next((k for k in keep if t.confirmed and k.confirmed and
                         float(np.linalg.norm(t.state[:2] - k.state[:2]))
                         < 0.55), None)
             if dup is None:
                 keep.append(t)
-            elif t.id == self.followed_id:
-                self.followed_id = dup.id
+            else:
+                if t.last_update > dup.last_update:
+                    dup.state = t.state.copy()
+                    dup.cov = t.cov.copy()
+                    dup.last_update = t.last_update
+                    dup.missed = min(dup.missed, t.missed)
+                if t.id == self.followed_id:
+                    self.followed_id = dup.id
         self.tracks = keep
         # No new tracks until the background grid has matured: during
         # warm-up every furniture cell is still 'unknown' and clutter pairs
@@ -721,6 +754,19 @@ class PersonTracker(Node):
                 # Resurrection births skip the dynamic-evidence gate: the
                 # purged region reads 'unknown', which yields zero dynamic
                 # ratio even for a genuinely stepping person.
+                near_confirmed = any(
+                    t.confirmed and math.hypot(
+                        candidates[i]['x'] - t.state[0],
+                        candidates[i]['y'] - t.state[1]) < 0.70
+                    for t in self.tracks)
+                if near_confirmed:
+                    # A stray cluster ON a confirmed person (gait swing
+                    # rejected this frame's update) must not birth a
+                    # twin: the twin confirms fast, twin suppression
+                    # then killed the SENIOR id and identity churned
+                    # 1->6->7->9 in 30 s (14:44 run, probe: confirmed
+                    # tracks dying with missed=0).
+                    continue
                 if candidates[i]['dynamic'] >= 0.3 or near_death:
                     track = Track(candidates[i]['x'], candidates[i]['y'],
                                   stamp)
