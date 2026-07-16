@@ -587,8 +587,19 @@ class PersonTracker(Node):
                         self.cells.pop((ix, iy), None)
         self.recent_deaths = [d for d in self.recent_deaths
                               if stamp - d[2] < 6.0]
+        # Candidate expiry (2026-07-16): tentative tracks born from
+        # boot-time cell jitter sat on furniture for 84 s — never
+        # confirmable (walking gate), never dying (the furniture cluster
+        # re-feeds them every frame). A real approaching person confirms
+        # within ~2 s of walking; 15 s without sustained motion is a
+        # thing, not a person. By then its cells are static, so it
+        # cannot re-birth (birth needs dynamic evidence).
         self.tracks = [t for t in self.tracks
-                       if stamp - t.last_update < self.p['track_timeout_s']]
+                       if stamp - t.last_update < self.p['track_timeout_s']
+                       and not (not t.confirmed
+                                and stamp - t.born > 15.0
+                                and t.moving_time
+                                < self.p['min_moving_confirm_s'])]
         # Twin suppression (2026-07-15): one person's identity kept
         # splitting into id PAIRS (1<->30, 63<->66, 90<->110 in one
         # session) — association re-births a fresh track on the person,
