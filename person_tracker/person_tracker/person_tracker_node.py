@@ -164,6 +164,7 @@ class PersonTracker(Node):
         self.pose = None                    # (x, y, yaw) odom frame
         self.robot_speed = 0.0
         self.robot_yaw_rate = 0.0
+        self._odom_stamp = None
         self.ego_calm = True
         self.first_scan_stamp = None
         self.last_scan_stamp = None
@@ -209,10 +210,27 @@ class PersonTracker(Node):
             return 0.237, 0.0, math.pi
 
     def _odom(self, msg):
-        self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
-                     yaw_from_quaternion(msg.pose.pose.orientation))
-        self.robot_speed = abs(msg.twist.twist.linear.x)
-        self.robot_yaw_rate = abs(msg.twist.twist.angular.z)
+        pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
+                yaw_from_quaternion(msg.pose.pose.orientation))
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        # tf_odom_bridge publishes POSE ONLY — twist is always zero, so
+        # reading it left the ego gate blind since birth: the tracker
+        # believed the robot was permanently stationary (ego_calm 100%
+        # through whole 3-point turns, 22:25 bag) and every maneuver's
+        # ICP shift minted 'moving' ghosts unguarded. Derive ego motion
+        # from consecutive poses, exactly like the controller does.
+        if self.pose is not None and self._odom_stamp is not None:
+            dt = stamp - self._odom_stamp
+            if 1e-3 < dt < 0.5:
+                speed = math.hypot(pose[0] - self.pose[0],
+                                   pose[1] - self.pose[1]) / dt
+                yaw_rate = abs(math.atan2(
+                    math.sin(pose[2] - self.pose[2]),
+                    math.cos(pose[2] - self.pose[2]))) / dt
+                self.robot_speed += 0.4 * (speed - self.robot_speed)
+                self.robot_yaw_rate += 0.4 * (yaw_rate - self.robot_yaw_rate)
+        self.pose = pose
+        self._odom_stamp = stamp
 
     # ------------------------------------------------------------- scan --
     def _scan(self, msg):
