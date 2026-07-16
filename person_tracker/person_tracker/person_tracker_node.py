@@ -111,7 +111,11 @@ class Track:
             # last_moving) accrues only while the ego frame is calm.
             self.travel = max(self.travel, float(
                 np.linalg.norm(self.state[:2] - self.origin)))
-            if self.speed > 0.15:
+            # 0.30, not 0.15: ghost jitter reaches Kalman speed 0.22
+            # (measured p90, 21:17 bag) and endlessly refreshed
+            # 'recently moving' — the staleness clock never fired and a
+            # ghost could hold followership forever. 0.30 = walking.
+            if self.speed > 0.30:
                 self.last_moving = stamp
         self.last_update = stamp
         self.missed = 0
@@ -505,7 +509,7 @@ class PersonTracker(Node):
                        None)
         if current is not None:
             stale = (self.last_scan_stamp is not None and
-                     self.last_scan_stamp - current.last_moving > 4.0)
+                     self.last_scan_stamp - current.last_moving > 2.5)
             # A follow-switch needs a SUSTAINED walker, not one frame of
             # Kalman jitter: real speed AND real accumulated distance
             # (with the teleport gate, furniture cannot fake 0.8 m).
@@ -515,7 +519,7 @@ class PersonTracker(Node):
             if not (stale and movers and self.ego_calm):
                 return current
             self.get_logger().info(
-                f'follow target {current.id} stationary >4 s while '
+                f'follow target {current.id} stationary >2.5 s while '
                 f'track {movers[0].id} is moving: switching')
         moving = [t for t in confirmed if t.speed > 0.15]
         pool = moving or confirmed
