@@ -80,6 +80,7 @@ class AdaptiveAckermannController(Node):
             'control_rate_hz': 50.0,
             'command_timeout_s': .5, 'odom_timeout_s': .5,
             'scan_timeout_s': .5, 'obstacle_stop_m': .2,
+            'obstacle_approach_speed_gain': .8,
             'maximum_forward_speed_mps': .35, 'maximum_reverse_speed_mps': .30,
             # Normal Nav2 cruise ceiling.  The larger actuator maximum above
             # remains a hard safety clamp, not a request to make RPP drive at
@@ -1020,6 +1021,21 @@ class AdaptiveAckermannController(Node):
         if abs(requested_v) < .01: return 0., 0., 'zero command'
         curvature = self._clamp_curvature(
             self.cmd.angular.z / requested_v)
+        # Clearance-proportional approach envelope (2026-07-16 11:16 run:
+        # the follower reversed at 0.40 m/s toward a person and the hard
+        # gate only fired 0.11 m from their ankles — braking overshoot
+        # ate the margin). Speed toward the nearer side is capped by the
+        # remaining margin so the robot GLIDES to the stop bubble instead
+        # of slamming into the gate. Curvature is computed from the
+        # original request, so the arc geometry is preserved; a creep
+        # floor keeps goal approaches above the stall speed.
+        margin = ((self.closest_forward if requested_v > 0.
+                   else self.closest_reverse)
+                  - self.required_stop_clearance)
+        if math.isfinite(margin):
+            cap = max(self.p['minimum_sustain_speed_mps'],
+                      self.p['obstacle_approach_speed_gain'] * margin)
+            requested_v = clamp(requested_v, -cap, cap)
         # Minimum sustainable speed and steering-transition slowdown were
         # already applied before Collision Monitor. Execute the approved Twist
         # unchanged; downstream safety logic may only replace it with zero.
