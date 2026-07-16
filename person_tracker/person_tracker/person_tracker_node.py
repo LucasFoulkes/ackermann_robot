@@ -478,8 +478,15 @@ class PersonTracker(Node):
         for track in self.tracks:
             if (track.confirmed and
                     stamp - track.last_update >= self.p['track_timeout_s']):
-                self.recent_deaths.append(
-                    (float(track.state[0]), float(track.state[1]), stamp))
+                # Resurrection is for PEOPLE: only a track that earned
+                # walker-grade travel leaves a resurrection zone. Ghost
+                # deaths were seeding fast-confirm (0.15 m) zones all
+                # over the room — a resurrection CASCADE (confirms at
+                # 0.17-0.21 m travel, ids past 110, 22:41 session).
+                if track.travel >= 0.80:
+                    self.recent_deaths.append(
+                        (float(track.state[0]), float(track.state[1]),
+                         stamp))
                 # Purge the grid around the death: a person who stood still
                 # long enough for their track to die has been absorbed into
                 # the static background — which then classifies their next
