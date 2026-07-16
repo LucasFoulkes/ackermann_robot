@@ -68,6 +68,7 @@ def generate_launch_description():
     control = os.path.join(share, 'config', 'adaptive_controller.yaml')
     tree = os.path.join(share, 'config', 'navigate_to_pose_ackermann.xml')
     arm = LaunchConfiguration('arm_hardware')
+    record = LaunchConfiguration('record_telemetry')
     (curvature_limit, controller_radius, planner_radius,
      trackability_path, utilization, prior_radius,
      planner_source, planner_confidence) = (
@@ -94,7 +95,9 @@ def generate_launch_description():
         Node(package='adaptive_ackermann',
              executable='adaptive_ackermann_controller',
              output='screen', parameters=[control, actuator_envelope, {
-                 'birth_certificate_path': birth_certificate}]),
+                 'birth_certificate_path': birth_certificate,
+                 'record_telemetry': ParameterValue(
+                     record, value_type=bool)}]),
         Node(package='pca9685_effort_driver',
              executable='pca9685_effort_driver',
              output='screen', parameters=[{
@@ -170,6 +173,9 @@ def generate_launch_description():
                                     'behavior_server', 'bt_navigator',
                                     'collision_monitor']}])
     return LaunchDescription([
+        DeclareLaunchArgument('record_telemetry', default_value='false',
+                              description='Write the flight-recorder CSV '
+                              '(diagnostic only; learning is online)'),
         DeclareLaunchArgument('arm_hardware', default_value='false',
                               description='Actually drive PCA9685 outputs'),
         LogInfo(msg=(

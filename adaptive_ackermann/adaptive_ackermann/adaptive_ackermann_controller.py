@@ -272,6 +272,10 @@ class AdaptiveAckermannController(Node):
             'rpp_max_lookahead_m': .75,
             'runtime_model_path': '~/.robot/adaptive_ackermann_runtime.yaml',
             'drive_log_directory': '~/.robot/drive_logs',
+            # Telemetry is DIAGNOSTIC only - all learning is online
+            # (writes ~/.robot/*.yaml directly). Off by default; the
+            # bringup 'record:=true' arg enables it for forensics.
+            'record_telemetry': False,
             'forward_throttle_map': [.2, -0.2519, .25, -0.2571],
             'reverse_throttle_map': [.2, 0.2891, .25, 0.2923],
             'forward_steering_map': [-1.15, -0.8337, 0., -0.0248, 1.15, 0.5605],
@@ -337,10 +341,15 @@ class AdaptiveAckermannController(Node):
                 self.steering_maps[d] = projected
         self._load_learned_steering()
         self.runtime_path = os.path.expanduser(self.p['runtime_model_path'])
-        log_directory = os.path.expanduser(self.p['drive_log_directory'])
-        os.makedirs(log_directory, exist_ok=True)
-        self.drive_log_path = os.path.join(
-            log_directory, time.strftime('adaptive_drive_%Y%m%d_%H%M%S.csv'))
+        if self.p['record_telemetry']:
+            log_directory = os.path.expanduser(
+                self.p['drive_log_directory'])
+            os.makedirs(log_directory, exist_ok=True)
+            self.drive_log_path = os.path.join(
+                log_directory,
+                time.strftime('adaptive_drive_%Y%m%d_%H%M%S.csv'))
+        else:
+            self.drive_log_path = os.devnull
         self.drive_log = open(self.drive_log_path, 'w', newline='', buffering=1)
         self.drive_writer = csv.DictWriter(self.drive_log, fieldnames=[
             'monotonic_s', 'fresh_odom', 'state', 'fault', 'direction',

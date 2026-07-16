@@ -60,6 +60,11 @@ ros2 launch ackermann_robot bringup.launch.py arm_hardware:=true
 bash ackermann_robot/tools/preflight_session.sh
 ```
 
+Diagnostics recording is **off by default** — learning is fully online and
+needs no files. Add `record:=true` to also write the session rosbag
+(`~/.robot/bags/`) and the flight-recorder CSV (`~/.robot/drive_logs/`,
+~100 MB/session together) when a run needs post-mortem forensics.
+
 Always launch from your own terminal (keep Ctrl-C in your hands). Builds:
 `colcon build` **only from `~/ros2_ws`** — building from a package directory
 creates nested `build/install/log` and silently ships nothing; verify with

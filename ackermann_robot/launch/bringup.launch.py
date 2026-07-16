@@ -40,7 +40,7 @@ def generate_launch_description():
     serial_port = LaunchConfiguration('serial_port')
     serial_baudrate = LaunchConfiguration('serial_baudrate')
     arm_hardware = LaunchConfiguration('arm_hardware')
-    record_bag = LaunchConfiguration('record_bag')
+    record = LaunchConfiguration('record')
     follow = LaunchConfiguration('follow')
 
     bag_directory = os.path.expanduser('~/.robot/bags')
@@ -140,6 +140,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             'arm_hardware': arm_hardware,
+            'record_telemetry': record,
         }.items(),
     )
 
@@ -168,7 +169,7 @@ def generate_launch_description():
         output='screen')
 
     flight_recorder = ExecuteProcess(
-        condition=IfCondition(record_bag),
+        condition=IfCondition(record),
         cmd=[
             'ros2', 'bag', 'record',
             '/tf', '/tf_static', '/scan', '/odom',
@@ -220,11 +221,13 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            'record_bag',
-            default_value='true',
+            'record',
+            default_value='false',
             description=(
-                'Record synchronized navigation and controller topics under '
-                '~/.robot/bags (enabled by default).'
+                'Record diagnostics: session rosbag (~/.robot/bags) and the '
+                'controller flight-recorder CSV (~/.robot/drive_logs). '
+                'Learning is fully online and unaffected - enable only '
+                'when a session needs post-mortem forensics.'
             ),
         ),
         DeclareLaunchArgument(
