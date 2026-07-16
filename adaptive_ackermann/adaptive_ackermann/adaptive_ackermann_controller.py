@@ -915,7 +915,7 @@ class AdaptiveAckermannController(Node):
             external, front_clearance, rear_clearance = scan_point_clearance(
                 distance, angle, lidar_x, lidar_y, lidar_yaw,
                 front_x, rear_x, half_width,
-                curvature=self.last_commanded_curvature)
+                curvature=self.corridor_curvature())
             if not external:
                 continue
             valid.append(distance)
@@ -1385,6 +1385,18 @@ class AdaptiveAckermannController(Node):
         if not candidates:
             return None
         return min(candidates, key=lambda item: abs(item[0] - stamp))[1]
+
+    def corridor_curvature(self):
+        # The clearance corridor must follow the trajectory the robot
+        # is ACTUALLY on. Bending it by the commanded arc alone let a
+        # dead-ahead wall slip outside the corridor while steering lag
+        # kept the robot plowing straight at it (front clearance hit
+        # 0.09 m at +0.31 m/s, 02:39 session). Moving: measured
+        # curvature (trajectory truth). Stationary/launch: the command
+        # (pre-steer means the plant will follow it from the start).
+        if abs(self.speed) > 0.15:
+            return self._clamp_curvature(self.yaw_rate / self.speed)
+        return self.last_commanded_curvature
 
     def _curvature_caps(self):
         base = self.p['maximum_curvature_1pm']

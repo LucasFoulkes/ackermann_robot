@@ -180,6 +180,7 @@ class PersonTracker(Node):
         self.tracks = []
         self.recent_deaths = []       # (x, y, stamp) of dead CONFIRMED tracks
         self.followed_id = None
+        self.last_switch_stamp = 0.0
         self.scan_count = 0
 
         qos = QoSProfile(depth=5)
@@ -612,6 +613,18 @@ class PersonTracker(Node):
             # staring, switch even without motion.
             humans = [t for t in confirmed
                       if t.id != current.id and t.person_score > 0.35]
+            # SENIORITY (2026-07-16 03:00 ping-pong: referee endorsed
+            # the standing person at 0.51, the motion rule stole
+            # followership back 3x in 300 ms for a 0.10-scoring
+            # artifact): shape evidence OUTRANKS motion evidence. A
+            # referee-endorsed target cannot be un-followed by mere
+            # motion elsewhere; and no switch of any kind more than
+            # once per 2 s.
+            if seconds_now := (self.last_scan_stamp or 0.0):
+                if seconds_now - self.last_switch_stamp < 2.0:
+                    return current
+            if current.person_score > 0.35:
+                movers = []
             if (self.ego_calm and humans
                     and current.person_score < 0.12):
                 best = max(humans, key=lambda t: t.person_score)
@@ -620,12 +633,14 @@ class PersonTracker(Node):
                     f'{current.person_score:.2f}, track {best.id} scores '
                     f'{best.person_score:.2f} — switching')
                 self.followed_id = best.id
+                self.last_switch_stamp = self.last_scan_stamp or 0.0
                 return best
             if not (stale and movers and self.ego_calm):
                 return current
             self.get_logger().info(
                 f'follow target {current.id} stationary >2.5 s while '
                 f'track {movers[0].id} is moving: switching')
+            self.last_switch_stamp = self.last_scan_stamp or 0.0
         endorsed = [t for t in confirmed if t.person_score > 0.35]
         moving = [t for t in confirmed if t.speed > 0.15]
         pool = endorsed or moving or confirmed
