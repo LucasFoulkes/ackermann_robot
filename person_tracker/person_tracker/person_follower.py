@@ -349,7 +349,16 @@ class PersonFollower(Node):
         if xb > 0.05 and distance <= self.p['band_outer_m']:
             reachable = comfortably = True
         if self.kturn_phase is None and not reachable:
-            self.kturn_phase = 'rev' if xb < 0 else 'fwd'
+            # User insight (backed by their simulation's 'backoff' mode):
+            # when the target is IN FRONT but inside the turning circle,
+            # start by REVERSING at opposite lock — reversing swings the
+            # nose toward the target while GAINING the space the forward
+            # arc needs. Driving forward first (old behavior) spends the
+            # exact space that made the target unreachable. Forward-first
+            # only when the target is far; behind-target starts reverse
+            # as before.
+            close = distance < 1.2
+            self.kturn_phase = 'rev' if (xb < 0 or close) else 'fwd'
             self.kturn_phase_until = seconds + self.p['kturn_phase_max_s']
             self.kturn_blocked_since = None
             self.get_logger().info(

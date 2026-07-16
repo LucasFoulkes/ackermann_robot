@@ -116,7 +116,14 @@ def generate_launch_description():
                  # 2.2 s = decel 0.5 + handoff 0.8 + debounce 0.5 + launch 0.4).
                  'cusp_settle_time_s': 0.10,
                  'cusp_goal_checker_id': 'cusp_goal_checker',
-                 'minimum_executable_segment_m': 0.18,
+                 # 0.18 let Smac's 2-3-pose alignment nubs execute as
+                 # full stop-flip-step cycles (27% of movement episodes
+                 # were <1.5 s 'weird steps', 01:22 run). 0.30: nubs get
+                 # skipped and their neighbors MERGED; the capped
+                 # steering feedback absorbs the ~0.2 m kink while
+                 # rolling. Real tight-quarter cusp legs are >=0.35 m at
+                 # the 0.95 m planning radius.
+                 'minimum_executable_segment_m': 0.30,
                  'segment_no_progress_timeout_s': 6.0,
                  'segment_progress_epsilon_m': 0.05,
                  'segment_wrong_direction_timeout_s': 0.75,
