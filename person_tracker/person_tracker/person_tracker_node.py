@@ -662,6 +662,18 @@ class PersonTracker(Node):
                     (track.confirm_travel is not None
                      and track.moving_time >= 0.3) or
                     track.moving_time >= self.p['min_moving_confirm_s'])
+                # Referee fast-confirm (16:09 bag: identity deaths
+                # during drive legs cost a fresh 1-2 m re-confirmation
+                # walk each time - resurrection zones expire in 6 s and
+                # sit at the stale death spot). When DR-SPAAM is SURE
+                # (>0.45; the worst furniture incident scored 0.39),
+                # one genuine step suffices: geometry already required
+                # dynamic-cell birth, and the relative override guards
+                # arbitration above this.
+                if track.person_score > 0.45:
+                    needed = min(needed, 0.15)
+                    walked_enough = (walked_enough or
+                                     track.moving_time >= 0.3)
                 near_furniture = any(
                     stamp - fs < 600.0 and math.hypot(
                         track.state[0] - fx, track.state[1] - fy) < 0.45
