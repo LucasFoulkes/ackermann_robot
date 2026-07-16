@@ -718,6 +718,35 @@ class PathSegmentDispatcher(Node):
             else:
                 merged.append((segment, direction))
         segments = merged
+        # Terminal shuffle trimming (2026-07-16): near tight goals
+        # Reeds-Shepp polishes the final pose with a dance of 20-40 cm
+        # alternating nubs — six legs whose entire contribution fits
+        # INSIDE the goal checker's tolerance (0.15 m / 0.30 rad), while
+        # each flip costs ~2 s of stop/re-arm/launch in execution that
+        # the planner never pays for. Execute the real motions; skip the
+        # millimeter polish the checker would accept anyway.
+        if segments:
+            final = segments[-1][0].poses[-1].pose
+            fx, fy = final.position.x, final.position.y
+            fyaw = yaw_from_quaternion(final.orientation)
+            while len(segments) > 1:
+                _, _, tail_len, _ = segment_properties(segments[-1][0])
+                if tail_len >= 0.45:
+                    break
+                prev_end = segments[-2][0].poses[-1].pose
+                dx = fx - prev_end.position.x
+                dy = fy - prev_end.position.y
+                dyaw = math.atan2(
+                    math.sin(fyaw - yaw_from_quaternion(
+                        prev_end.orientation)),
+                    math.cos(fyaw - yaw_from_quaternion(
+                        prev_end.orientation)))
+                if math.hypot(dx, dy) > 0.12 or abs(dyaw) > 0.25:
+                    break
+                segments.pop()
+                self.get_logger().info(
+                    'Trimmed terminal polish nub (%.2f m; goal already '
+                    'within checker tolerance)' % tail_len)
         if not segments:
             result.error_code = FollowPath.Result.INVALID_PATH
             result.error_msg = 'path has no executable segment'
