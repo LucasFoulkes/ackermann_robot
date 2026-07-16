@@ -621,6 +621,11 @@ class AdaptiveAckermannController(Node):
                     if key in saved_rate:
                         self.trim_rate[key] = clamp(
                             float(saved_rate[key]), 0.25, 4.0)
+            saved_accel = saved.get('launch_accel')
+            if isinstance(saved_accel, dict) and 'mps2' in saved_accel:
+                self.launch_accel = {
+                    'mps2': clamp(float(saved_accel['mps2']), 0.4, 1.6),
+                    'observations': int(saved_accel.get('observations', 0))}
             saved_anchor = saved.get('cruise_anchor')
             if isinstance(saved_anchor, dict):
                 for direction, model in self.cruise_anchor.items():
@@ -713,8 +718,13 @@ class AdaptiveAckermannController(Node):
                     'throttle_probe_observations':
                         self.throttle_probe_results,
                     'cruise_anchor': self.cruise_anchor,
+                    'launch_accel': self.launch_accel,
                     'trim_rate': self.trim_rate,
                     'learning_rejections': self.learning_rejections,
+                'launch_accel_learned': self.launch_accel,
+                'model_residuals': {
+                    'speed_mps': round(self.speed_residual_ema, 3),
+                    'kappa_1pm': round(self.kappa_residual_ema, 3)},
                 'steering_rls_models': self.steering_models,
                     'estimated_steering_delay_s': self.estimated_steering_delay_s,
                     'steering_delay_estimator': self.delay_estimator.state(),
@@ -1483,6 +1493,39 @@ class AdaptiveAckermannController(Node):
         # learning state. The RLS residual EMA cannot serve here: it freezes
         # while the learned map is applied (identification guard), which the
         # 2026-07-12 rollback drill proved blinds the rollback trigger.
+        if fresh_odom and self.state == 'rolling' and not self.odom_outlier:
+            age = now - self.rolling_since
+            gap = abs(target) - abs(self.speed)
+            if age < 1.5 and gap > 0.08 and odom_dt > 1e-3:
+                self._launch_accel_samples.append(
+                    (abs(self.speed) - self._last_abs_speed) / odom_dt)
+            elif age >= 1.5 and len(self._launch_accel_samples) >= 4:
+                obs = sorted(self._launch_accel_samples)[
+                    len(self._launch_accel_samples) // 2]
+                if 0.2 < obs < 2.5:
+                    m = self.launch_accel
+                    m['mps2'] = clamp(
+                        m['mps2'] + 0.25 * (obs - m['mps2']), 0.4, 1.6)
+                    m['observations'] += 1
+                self._launch_accel_samples = []
+            self._last_abs_speed = abs(self.speed)
+            # Reference-model residuals (monitor only, never steers):
+            # what the LEARNED model predicts for the current outputs
+            # vs what odometry measured. One unified health signal.
+            direction_now = 'forward' if self.speed >= 0 else 'reverse'
+            inverse = sorted(
+                (effort, spd)
+                for spd, effort in self.throttle_maps[direction_now])
+            predicted_speed = interpolate(inverse, self.throttle_effort)
+            self.speed_residual_ema += 0.1 * (
+                abs(abs(self.speed) - abs(predicted_speed))
+                - self.speed_residual_ema)
+            if abs(self.speed) > 0.12:
+                predicted_kappa = self.steering_polarity *                     self._baseline_curvature_from_effort(
+                        direction_now, self.steering_effort)
+                self.kappa_residual_ema += 0.1 * (
+                    abs(self.yaw_rate / self.speed - predicted_kappa)
+                    - self.kappa_residual_ema)
         if (fresh_odom and self.state == 'rolling'
                 and self.odom_outlier and abs(target) > .01):
             self._reject_sample('odom_outlier')
@@ -1778,7 +1821,9 @@ class AdaptiveAckermannController(Node):
             # jumps to map(0.6) while the wheels barely roll. Ramp the
             # throttle target from the sustain floor as rolling matures;
             # steering and safety gates see the ORIGINAL command.
-            ramp = self.p['launch_target_ramp_mps2']
+            ramp = (clamp(self.launch_accel['mps2'], 0.4, 1.6)
+                    if self.launch_accel['observations'] >= 3
+                    else self.p['launch_target_ramp_mps2'])
             if ramp > 0.0:
                 age = (now - self.rolling_since
                        if self.state == 'rolling' else 0.0)
@@ -2463,6 +2508,10 @@ class AdaptiveAckermannController(Node):
                 'front_clearance_m': self.closest_forward,
                 'rear_clearance_m': self.closest_reverse,
                 'learning_rejections': self.learning_rejections,
+                'launch_accel_learned': self.launch_accel,
+                'model_residuals': {
+                    'speed_mps': round(self.speed_residual_ema, 3),
+                    'kappa_1pm': round(self.kappa_residual_ema, 3)},
                 'steering_rls_models': self.steering_models,
                 'steering_model_confidence': {
                     key: self._model_confidence(model)
