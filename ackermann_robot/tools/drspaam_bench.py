@@ -40,6 +40,12 @@ def main():
         print(__doc__)
         return
     bag, ckpt = sys.argv[1], sys.argv[2]
+    # checkpoints were saved on a GPU machine; the authors' Detector
+    # calls torch.load without map_location — remap everything to CPU.
+    import torch
+    _orig_load = torch.load
+    torch.load = lambda *a, **k: _orig_load(
+        *a, **{**k, 'map_location': 'cpu'})
     from dr_spaam.detector import Detector
     detector = Detector(ckpt, model='DR-SPAAM', gpu=False, stride=1,
                         panoramic_scan=True)
