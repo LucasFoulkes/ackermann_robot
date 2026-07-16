@@ -141,7 +141,7 @@ class PersonTracker(Node):
                 'birth_certificate.yaml'),
             'cell_m': 0.05,
             # Cell occupied this long (and seen in most scans) -> furniture.
-            'background_promote_s': 8.0,
+            'background_promote_s': 4.0,
             'max_person_range_m': 5.0,
             'cluster_jump_m': 0.13,
             'leg_width_min_m': 0.03,
@@ -318,8 +318,12 @@ class PersonTracker(Node):
             fy = sy + dists * math.sin(a[beam])
             free_cells.update(zip((fx / cell_m).astype(int),
                                   (fy / cell_m).astype(int)))
+        # Only CONFIRMED tracks protect their cells from background
+        # promotion. Tentative tracks used to as well — so a chair that
+        # fooled us once protected its own cells forever and was never
+        # learned as furniture (the immortal-ghost loop, 2026-07-16).
         protected = {self._cell(t.state[0] + dx, t.state[1] + dy)
-                     for t in self.tracks
+                     for t in self.tracks if t.confirmed
                      for dx in (-0.2, 0.0, 0.2) for dy in (-0.2, 0.0, 0.2)}
         for cell in free_cells:
             entry = self.cells.get(cell)
@@ -330,9 +334,26 @@ class PersonTracker(Node):
                 # re-crossing their own trail — 110 s blind spells after
                 # the robot drove around, 2026-07-14 00:51 session.)
                 self.cells[cell] = [stamp, 0.0, 0, 1, False]
-            elif entry[2] > 0 and entry[3] > 4 and not entry[4]:
-                # Occupied in the past but repeatedly seen free since:
-                # forget the stale occupancy (departed person's trail).
+            elif entry[4]:
+                # Moved furniture heals: sustained free sightings with no
+                # fresh hits demote the cell back to unknown, so the spot
+                # doesn't stay a person-blind zone forever.
+                entry[3] += 1
+                if entry[3] > 40 and stamp - entry[1] > 10.0:
+                    # Lazy on purpose: grazing beams (near-parallel to a
+                    # wall) mark wall cells free every scan while the
+                    # wall is briefly unhit — an eager threshold demoted
+                    # 15% of legit walls in replay. Real moved furniture
+                    # accumulates this in ~5 s of clear line of sight.
+                    self.cells.pop(cell, None)
+            elif (entry[2] > 0 and entry[3] > 4
+                    and stamp - entry[1] > 1.0):
+                # Occupied in the past but repeatedly seen free since AND
+                # no recent hit: forget the stale occupancy (departed
+                # person's trail). The recency guard keeps grazing beams
+                # (near-parallel to walls) from wiping cells that are
+                # still being hit every scan — that wipe/re-hit cycle
+                # made WALLS read as perpetually-fresh dynamic returns.
                 self.cells.pop(cell, None)
             else:
                 entry[3] = min(entry[3] + 1, 10)
@@ -343,6 +364,16 @@ class PersonTracker(Node):
             entry = self.cells.setdefault(cell, [stamp, stamp, 0, 0, False])
             entry[1] = stamp
             entry[2] += 1
+            if entry[4]:
+                entry[3] = 0        # furniture re-seen: clear demotion
+            elif entry[2] > 8 and entry[3] > 0:
+                # A cell hit for 8+ scans is a surface, not an arrival:
+                # its 'was free' evidence is grazing-beam noise. Without
+                # this, wall cells carried free-counts forever and every
+                # wall point classified DYNAMIC (blue leg markers on
+                # walls, 2026-07-16). A stepping person births within
+                # ~5 hits, untouched by this.
+                entry[3] = 0
             if (not entry[4] and cell not in protected
                     and stamp - entry[0] > promote
                     and entry[2] > 0.4 * promote * 8):   # ~8 scans/s min
