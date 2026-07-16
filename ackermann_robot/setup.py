@@ -15,7 +15,6 @@ setup(
             ['resource/' + package_name],
         ),
         ('share/' + package_name, ['package.xml']),
-        (join('share', package_name, 'docs'), glob('docs/*.md')),
         (join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (join('share', package_name, 'config'), glob('config/*')),
         (join('share', package_name, 'urdf'), glob('urdf/*')),
