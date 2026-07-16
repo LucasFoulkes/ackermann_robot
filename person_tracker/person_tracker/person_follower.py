@@ -139,7 +139,10 @@ class PersonFollower(Node):
             # plans in ~1-2 s on this Pi. Fail fast, fall back to the
             # reactive 3-point (which handled it fine when the planner
             # finally gave up).
-            'reorient_timeout_s': 10.0,
+            # Smac verdicts (success or exceeded-iterations) arrive in
+            # 1-3 s; the rest of a long timeout is the BT re-trying a
+            # plan it already failed. 5 s = one honest attempt.
+            'reorient_timeout_s': 5.0,
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
             # ACBB'95 Lyapunov pursuit gains + gear hysteresis (v6)
@@ -374,8 +377,17 @@ class PersonFollower(Node):
         if seconds - self.gear_since > self.p['gear_dwell_s']:
             if self.gear > 0 and (
                     math.cos(alpha) < -0.25 or
-                    (k_need > 0.95 * k_max and distance < 2.2
+                    (k_need > 1.6 * k_max and distance < 1.4
                      and error > 0.1)):
+                # Reverse only for targets DEEP inside the turning
+                # circle at close quarters. A side target marginally
+                # inside it (kNeed ~ kMax) is reached by sweeping the
+                # forward full-lock arc — alpha falls, kNeed falls,
+                # done in seconds. The old 0.95x bar latched reverse
+                # for any side target within 2.2 m; reverse then jammed
+                # on blind-side clutter and fell into the route-around
+                # ritual: 45 s to approach a person standing 2 m away
+                # (11:30 run).
                 self.gear = -1
                 self.gear_since = seconds
                 self.get_logger().info(
