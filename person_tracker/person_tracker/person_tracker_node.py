@@ -145,7 +145,15 @@ class PersonTracker(Node):
             'max_person_range_m': 5.0,
             'cluster_jump_m': 0.13,
             'leg_width_min_m': 0.03,
-            'leg_width_max_m': 0.30,
+            'leg_width_max_m': 0.25,
+            # Legs present a convex arc TOWARD the sensor: bulge = max
+            # perpendicular deviation of interior points from the
+            # endpoint chord, positive toward the lidar. Real ankles/
+            # calves (with pants) bow out 2-6 cm; walls are flat
+            # (<1 cm noise); box/column corners bow far MORE than any
+            # leg. Floor + ceiling kills both.
+            'leg_bulge_min_m': 0.010,
+            'leg_bulge_max_m': 0.09,
             'leg_pair_min_m': 0.10,
             'leg_pair_max_m': 0.50,
             'merged_width_min_m': 0.20,
@@ -424,11 +432,22 @@ class PersonTracker(Node):
             member_ys = ys[members]
             width = math.hypot(member_xs[-1] - member_xs[0],
                                member_ys[-1] - member_ys[0])
+            bulge = 0.0
+            if len(members) >= 5 and width > 1e-6 \
+                    and self.sensor_xy is not None:
+                ax, ay = member_xs[0], member_ys[0]
+                cx_, cy_ = member_xs[-1] - ax, member_ys[-1] - ay
+                side = math.copysign(
+                    1.0, cx_ * (self.sensor_xy[1] - ay)
+                    - cy_ * (self.sensor_xy[0] - ax))
+                dev = (cx_ * (member_ys[1:-1] - ay)
+                       - cy_ * (member_xs[1:-1] - ax)) / width
+                bulge = float((side * dev).max())
             classes = [self._point_class(x, y)
                        for x, y in zip(member_xs, member_ys)]
             out.append({
                 'x': float(member_xs.mean()), 'y': float(member_ys.mean()),
-                'n': len(members), 'width': width,
+                'n': len(members), 'width': width, 'bulge': bulge,
                 'range': float(r[members].mean()),
                 'static_ratio': classes.count(0) / len(classes),
                 'dynamic_ratio': classes.count(2) / len(classes),
@@ -443,10 +462,25 @@ class PersonTracker(Node):
             return 0.0
         if cluster['static_ratio'] > 0.5:
             return 0.0                       # mostly known furniture
+        if cluster['n'] >= 8 and cluster['width'] >= 0.30:
+            # Shape veto for the WIDE band only: wider than any single
+            # leg, so it must be a merged-legs blob — which shows a
+            # convex arc toward the sensor — or it is a wall/board
+            # segment (flat) or a box corner (over-bowed). MEASURED on
+            # the 03:02 bag: per-frame bulge separates poorly at leg
+            # widths (pants drape flat in 42-64% of frames), so
+            # narrower clusters are never shape-vetoed — there
+            # roundness is only a score bonus below.
+            if not (self.p['leg_bulge_min_m'] <= cluster['bulge']
+                    <= self.p['leg_bulge_max_m']):
+                return 0.0
         score = 0.5
         if cluster['width'] <= self.p['leg_width_max_m']:
             score += 0.2                     # single-leg-sized
         score += 0.3 * cluster['dynamic_ratio']
+        if (self.p['leg_bulge_min_m'] <= cluster['bulge']
+                <= self.p['leg_bulge_max_m']):
+            score += 0.2                     # leg-like convex arc
         return score
 
     def _pair_legs(self, legs):
