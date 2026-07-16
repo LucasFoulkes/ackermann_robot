@@ -52,7 +52,14 @@ adaptive_ackermann_controller:
     # unlocking 1.60 on the left while feedforward could mis-project
     # amplified errors (2026-07-15 regression session). Re-promote from
     # data, live-tunable.
-    maximum_curvature_positive_1pm: 0.0
+    # ENABLED 2026-07-16 (was parked during the preview-projection
+    # scare; the geometry guard + rolling-only preview close those
+    # holes). Left turns may use 1.60 of the measured 1.99; right stays
+    # on the certified symmetric pipeline (1.30). 01:02 run measured
+    # steering effort maxing 0.97 at the SYMMETRIC ceiling — the plant
+    # was giving everything it was allowed; this raises the allowance
+    # where capability exists.
+    maximum_curvature_positive_1pm: 1.60
     maximum_curvature_negative_1pm: 0.0
     maximum_curvature_1pm: 1.35   # promoted 2026-07-14 from MEASURED full-lock
     # capability (drill circles: kappa 1.99 LEFT / 1.40 RIGHT); 1.35 sits just
@@ -61,7 +68,8 @@ adaptive_ackermann_controller:
     # remain decoupled — this raises only the executable ceiling.
     # Smac uses only this fraction of the learned physical curvature. The
     # remaining authority is reserved for local tracking correction.
-    planning_curvature_utilization: 0.85  # 0.80 capped planning at
+    planning_curvature_utilization: 0.90  # plans to ~kappa 1.17
+    # (r 0.86); correction headroom preserved by the feedback cap  # 0.80 capped planning at
     # 0.96 m radius even after trackability earns more; 0.85 -> 0.91 m.
     # Bootstrap prior, not a permanent minimum. The cusp dispatcher learns
     # trackable curvature separately for forward/reverse and left/right.
