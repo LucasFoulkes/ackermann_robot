@@ -40,6 +40,9 @@ def main():
         print(__doc__)
         return
     bag, ckpt = sys.argv[1], sys.argv[2]
+    # every Nth scan (default 4): the Kalman layer carries identity
+    # between classifications, so scoring doesn't need 10 Hz either.
+    scan_skip = int(sys.argv[3]) if len(sys.argv) > 3 else 4
     # checkpoints were saved on a GPU machine; the authors' Detector
     # calls torch.load without map_location — remap everything to CPU.
     import torch
@@ -47,7 +50,7 @@ def main():
     torch.load = lambda *a, **k: _orig_load(
         *a, **{**k, 'map_location': 'cpu'})
     from dr_spaam.detector import Detector
-    detector = Detector(ckpt, model='DR-SPAAM', gpu=False, stride=1,
+    detector = Detector(ckpt, model='DR-SPAAM', gpu=False, stride=2,
                         panoramic_scan=True)
     reader = SequentialReader()
     reader.open(StorageOptions(uri=bag, storage_id=''),
@@ -67,7 +70,13 @@ def main():
             debug_frames.append(json.loads(
                 deserialize_message(raw, String).data))
         elif topic == '/scan' and pose is not None:
+            scan_counter = getattr(main, '_n', 0) + 1
+            main._n = scan_counter
+            if scan_counter % scan_skip:
+                continue
             m = deserialize_message(raw, LaserScan)
+            if scan_counter % 400 == 0:
+                print(f'  ...scan {scan_counter}', flush=True)
             if not fov_set:
                 detector.set_laser_fov(
                     math.degrees(m.angle_max - m.angle_min))
