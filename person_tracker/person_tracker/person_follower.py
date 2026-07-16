@@ -89,6 +89,8 @@ class PersonFollower(Node):
     def __init__(self):
         super().__init__('person_follower')
         self.jam_hold_until = 0.0
+        self.gear = 1
+        self.gear_since = 0.0
         defaults = {
             'person_topic': '/person_tracker/person',
             'command_topic': '/cmd_vel_nav_raw',
@@ -139,6 +141,10 @@ class PersonFollower(Node):
             'reorient_timeout_s': 10.0,
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
+            # ACBB'95 Lyapunov pursuit gains + gear hysteresis (v6)
+            'lyap_ke': 1.3,
+            'lyap_ka': 2.5,
+            'gear_dwell_s': 0.5,
             # Below this person-distance a blocked chase HOLDS instead of
             # planning (Smac cannot solve sub-radius hops; see 23:15).
             'planner_min_detour_m': 1.3,
@@ -199,8 +205,8 @@ class PersonFollower(Node):
                                       'navigate_to_pose')
         self.create_timer(1.0 / self.p['control_rate_hz'], self._tick)
         self.get_logger().info(
-            'person_follower v5: graceful chase when single-arc reachable, '
-            'reactive 3-point turn otherwise')
+            'person_follower v6: ACBB95 Lyapunov pursuit — one law, '
+            'hysteretic gear, no modes')
 
     # ------------------------------------------------------------ inputs --
     def _person(self, msg):
@@ -327,88 +333,52 @@ class PersonFollower(Node):
                 return
             self.escape_until = None
             self.stalled_since = None
-        # Geometric reachability: the unique Ackermann arc through the
-        # person's body-frame position (PRM-paper edge test, a2=0 for our
-        # rear-axle frame). Reachable = ahead AND radius >= chassis limit.
-        yaw = self.pose[2]
-        xb = math.cos(yaw) * dx + math.sin(yaw) * dy
-        yb = -math.sin(yaw) * dx + math.cos(yaw) * dy
-        if abs(yb) < 1e-3:
-            arc_radius = math.inf
-        else:
-            arc_radius = (xb * xb + yb * yb) / (2.0 * abs(yb))
-        reachable = xb > 0.05 and arc_radius >= self.p['min_turn_radius_m']
-        comfortably = (xb > 0.05 and arc_radius >= self.p['min_turn_radius_m']
-                       * self.p['reach_exit_margin'])
-        # At standoff range the arc-through-the-person test is the WRONG
-        # question: anyone slightly off-axis at 0.6 m produces an
-        # impossibly tight arc (R 0.67-0.79 chatter, 19:47 session) — but
-        # the robot doesn't need to DRIVE THROUGH them, it's already
-        # inside the hold band. Maneuvers are for people genuinely away
-        # or behind; nearby-and-ahead means hold/align, never 3-point.
-        if xb > 0.05 and distance <= self.p['band_outer_m']:
-            reachable = comfortably = True
-        if self.kturn_phase is None and not reachable:
-            # User insight (backed by their simulation's 'backoff' mode):
-            # when the target is IN FRONT but inside the turning circle,
-            # start by REVERSING at opposite lock — reversing swings the
-            # nose toward the target while GAINING the space the forward
-            # arc needs. Driving forward first (old behavior) spends the
-            # exact space that made the target unreachable. Forward-first
-            # only when the target is far; behind-target starts reverse
-            # as before.
-            close = distance < 1.2
-            self.kturn_phase = 'rev' if (xb < 0 or close) else 'fwd'
-            self.kturn_phase_until = seconds + self.p['kturn_phase_max_s']
-            self.kturn_blocked_since = None
-            self.get_logger().info(
-                f'not arc-reachable (R={arc_radius:.2f} m, x={xb:+.2f}): '
-                'reactive 3-point turn')
-        elif self.kturn_phase is not None and comfortably:
-            self.kturn_phase = None
-            self.get_logger().info('arc-reachable: resuming pursuit')
-        if self.kturn_phase is not None:
-            # Blocked phase (gate hold / wall) -> switch direction NOW:
-            # walls truncate phases, the turn squeezes into available room.
-            blocked = False
-            if self.robot_speed < 0.03:
-                if self.kturn_blocked_since is None:
-                    self.kturn_blocked_since = seconds
-                elif (seconds - self.kturn_blocked_since
-                        > self.p['kturn_blocked_after_s']):
-                    blocked = True
-            else:
-                self.kturn_blocked_since = None
-            if blocked or seconds >= self.kturn_phase_until:
-                self.kturn_phase = ('rev' if self.kturn_phase == 'fwd'
-                                    else 'fwd')
-                self.kturn_phase_until = seconds + self.p['kturn_phase_max_s']
-                self.kturn_blocked_since = None
-            side = 1.0 if bearing > 0 else -1.0
-            command = Twist()
-            if self.kturn_phase == 'fwd':
-                command.linear.x = self.p['kturn_crawl_mps']
-                kappa = side * self.p['max_curvature_1pm']
-            else:
-                command.linear.x = -self.p['kturn_crawl_mps']
-                kappa = -side * self.p['max_curvature_1pm']
-            command.angular.z = command.linear.x * kappa
-            self.command_pub.publish(command)
-            self.was_commanding = True
-            self.stalled_since = None
-            return
-        # Park-Kuipers graceful law (theta=0: no final-heading constraint).
-        curvature = (self.p['k2'] * bearing + math.sin(bearing)) \
-            / max(distance, 0.3)
+        # ---- Follower v6: ACBB'95 Lyapunov pursuit (from the user's
+        # simulation). ONE law, no modes: v = ke*d*cos(a), w = ka*a +
+        # ke*sin(a)*cos(a). Reversal is not a special case — cos(a) < 0
+        # makes v negative when the person is behind/sharply aside, and
+        # swing-backs / 3-point-like moves EMERGE. The law is Lyapunov-
+        # stable: the distance to the target never increases. This
+        # replaces the arc-reachability test, the kturn phase machine,
+        # and the Park-Kuipers law (v5) — the modes we spent two nights
+        # debugging individually.
+        alpha = bearing
+        v_law = self.p['lyap_ke'] * error * math.cos(alpha)
+        w_law = (self.p['lyap_ka'] * alpha +
+                 self.p['lyap_ke'] * math.sin(alpha) * math.cos(alpha))
+        # A car cannot pivot at the cusp, so the gear is a HYSTERETIC
+        # commitment to the law's sign: reverse only when the person is
+        # clearly behind (cos a < -0.25), forward once the nose is
+        # within ~30 deg, minimum dwell so noise cannot chatter D<->R
+        # (the controller's own 0.5 s debounce still backstops).
+        if seconds - self.gear_since > self.p['gear_dwell_s']:
+            if self.gear > 0 and math.cos(alpha) < -0.25:
+                self.gear = -1
+                self.gear_since = seconds
+                self.get_logger().info(
+                    'gear latch: reverse (person behind/beside)')
+            elif self.gear < 0 and abs(alpha) < 0.55:
+                self.gear = 1
+                self.gear_since = seconds
+                self.get_logger().info('gear latch: forward')
+        v_div = self.gear * max(abs(v_law), 0.1)
         curvature = max(-self.p['max_curvature_1pm'],
-                        min(self.p['max_curvature_1pm'], curvature))
-        speed = self.p['max_speed_mps'] / (
-            1.0 + self.p['beta'] * abs(curvature) ** self.p['lambda'])
-        # Speed matching: move at the person's pace plus a catch-up term.
-        speed = min(speed,
-                    self.person_speed + self.p['speed_gain'] * error)
+                        min(self.p['max_curvature_1pm'], w_law / v_div))
+        # Speed magnitude from the law; the floor (which shrinks near the
+        # standoff so it cannot orbit) keeps a car that must move to turn
+        # moving, and stays above the drivetrain's drag-loaded band.
+        floor = max(0.15, min(0.30, 0.5 * abs(error)))
+        cap = (self.p['max_speed_mps'] if self.gear > 0
+               else min(self.p['max_speed_mps'], 0.35))
+        magnitude = max(floor, min(cap, abs(v_law)))
+        if self.gear > 0:
+            # Speed matching: the person's pace plus a catch-up term.
+            magnitude = min(magnitude,
+                            self.person_speed
+                            + self.p['speed_gain'] * error)
+        speed = self.gear * magnitude
         command = Twist()
-        command.linear.x = float(max(0.0, speed))
+        command.linear.x = float(speed)
         command.angular.z = float(command.linear.x * curvature)
         self.dbg_cmd_v = command.linear.x
         self.dbg_cmd_kappa = curvature
