@@ -480,6 +480,7 @@ class AdaptiveAckermannController(Node):
         self.startup_effort_attempts = 0
         self.startup_causal_effort = math.nan
         self.startup_kick_effort = math.nan
+        self.breakaway_pending = None
         self.planned_stop_since = 0.0
         self.control_segment_samples = None
         self.control_segment_length = 0.0
@@ -1724,6 +1725,7 @@ class AdaptiveAckermannController(Node):
                 self.startup_effort_attempts = 0
                 self.startup_causal_effort = math.nan
                 self.startup_kick_effort = math.nan
+                self.breakaway_pending = None
                 self.gentle_coast_active = False
                 self.gentle_pulse_active = False
                 self.recent_rolling_speeds.clear()
@@ -1753,6 +1755,12 @@ class AdaptiveAckermannController(Node):
                 self.gentle_coast_active = False
                 self.gentle_pulse_active = False
             elif self.state == 'rolling':
+                if (self.breakaway_pending is not None
+                        and directional_speed >= 0.10):
+                    # The squirm regime never reaches this speed; a real
+                    # launch always does.
+                    self._learn_breakaway(now, self.breakaway_pending)
+                    self.breakaway_pending = None
                 # A newly gentle request must shed rolling energy before any
                 # additional launch effort is allowed.
                 self.state = 'startup'
@@ -1997,7 +2005,7 @@ class AdaptiveAckermannController(Node):
                     if not math.isfinite(self.startup_kick_effort):
                         self.startup_kick_effort = self.throttle_effort
                     if self.state == 'startup':
-                        self._learn_breakaway(now, direction)
+                        self.breakaway_pending = direction
                     self.gentle_coast_active = True
                     self.gentle_coast_since = now
                     self.gentle_pulse_active = False
@@ -2005,7 +2013,14 @@ class AdaptiveAckermannController(Node):
                     self.throttle_antiwindup_state = 'gentle_motion_detected'
                 elif directional_speed >= self.p['breakaway_threshold_mps']:
                     if self.state == 'startup':
-                        self._learn_breakaway(now, direction)
+                        # Deferred booking (carpet lesson, 14:17 run):
+                        # crossing 0.045 m/s is not breakaway on soft
+                        # floors - the robot SQUIRMS 2-6 cm/s at efforts
+                        # far below what rolling needs, and booking the
+                        # squirm dragged the model 0.259 -> 0.231 while
+                        # 12 launches failed. Evidence is held pending
+                        # and booked only at confirmed rolling speed.
+                        self.breakaway_pending = direction
                     self.state = 'rolling'; self.low_samples = self.limit_dwell = 0
                     self.rolling_since = now
                     self.rolling_entry_speed = abs(directional_speed)
