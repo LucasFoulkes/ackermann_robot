@@ -161,6 +161,10 @@ def generate_launch_description():
              os.path.expanduser(
                  '~/ros2_ws/src/ackermann_robot/person_tracker/'
                  'person_tracker/person_referee.py')],
+        # died with exit 1 mid-session 2026-07-16 12:58 (alongside the
+        # collision_monitor segfault); without it the tracker loses its
+        # anti-furniture judgment silently. Resurrect it.
+        respawn=True, respawn_delay=5.0,
         output='screen')
 
     flight_recorder = ExecuteProcess(

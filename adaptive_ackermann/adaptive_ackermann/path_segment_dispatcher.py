@@ -792,6 +792,28 @@ class PathSegmentDispatcher(Node):
                 def feedback(message, frontend=goal_handle):
                     frontend.publish_feedback(message.feedback)
 
+                if index == 0:
+                    # Entry gate (12:58 crash chain): Smac emitted a comb
+                    # of 11 sub-0.30 m cusp fragments; skipping them left
+                    # an executable remainder starting 82 deg away from
+                    # the robot. Engaging it caused an instant
+                    # direction-flip abort, a replan storm, and (that
+                    # session) a collision_monitor segfault. A plan whose
+                    # first executable pose is not where the robot stands
+                    # is garbage — reject it before touching the
+                    # controller.
+                    first_samples, _, _, _ = segment_properties(segment)
+                    gate_xy, gate_yaw = self._pose_error(
+                        self.pose, first_samples[0])
+                    if gate_xy > 0.35 or gate_yaw > 0.70:
+                        result.error_code = (
+                            FollowPath.Result.FAILED_TO_MAKE_PROGRESS)
+                        result.error_msg = (
+                            f'entry gate: plan starts {gate_xy:.2f} m/'
+                            f'{gate_yaw:.2f} rad away from the robot')
+                        self.get_logger().warn(result.error_msg)
+                        goal_handle.abort()
+                        return result
                 backend_goal = await self.client.send_goal_async(
                     request, feedback_callback=feedback)
                 if not backend_goal.accepted:

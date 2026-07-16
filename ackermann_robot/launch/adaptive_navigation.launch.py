@@ -137,23 +137,35 @@ def generate_launch_description():
                  'trackability_prior_radius_m': prior_radius,
                  'trackability_physical_limit_1pm': (
                      curvature_limit * utilization)}]),
+        # respawn + bonds (2026-07-16 12:58: collision_monitor segfaulted
+        # mid-session, cutting the cmd_vel chain — the robot was bricked
+        # until relaunch). A respawned lifecycle node is useless without
+        # the manager re-activating it, hence bonds back on: the manager
+        # notices the death and reconnects within bond_respawn_max.
         Node(package='nav2_planner', executable='planner_server', output='screen',
+             respawn=True, respawn_delay=2.0,
              parameters=[nav, planner_envelope]),
         Node(package='nav2_controller', executable='controller_server', output='screen',
+             respawn=True, respawn_delay=2.0,
              parameters=[nav, controller_envelope],
              remappings=[('cmd_vel', 'cmd_vel_nav_raw'),
                          ('follow_path', 'follow_path_backend')]),
         Node(package='nav2_behaviors', executable='behavior_server', output='screen',
+             respawn=True, respawn_delay=2.0,
              parameters=[nav], remappings=[('cmd_vel', 'cmd_vel_nav_raw')]),
         Node(package='nav2_bt_navigator', executable='bt_navigator', output='screen',
+             respawn=True, respawn_delay=2.0,
              parameters=[nav, {'default_nav_to_pose_bt_xml': tree}]),
         Node(package='nav2_collision_monitor', executable='collision_monitor',
-             output='screen', parameters=[nav]),
+             output='screen', respawn=True, respawn_delay=2.0,
+             parameters=[nav]),
     ]
     lifecycle = Node(
         package='nav2_lifecycle_manager', executable='lifecycle_manager',
         name='lifecycle_manager_navigation', output='screen',
-        parameters=[{'autostart': True, 'bond_timeout': 0.0,
+        parameters=[{'autostart': True, 'bond_timeout': 4.0,
+                     'attempt_respawn_reconnection': True,
+                     'bond_respawn_max_duration': 10.0,
                      'node_names': ['planner_server', 'controller_server',
                                     'behavior_server', 'bt_navigator',
                                     'collision_monitor']}])
