@@ -92,7 +92,10 @@ class Track:
         # inherits a confirmed identity. A live track cannot jump more
         # than a walker moves in one frame; the allowance grows with
         # missed frames so a fast walker re-acquires after occlusion.
-        if float(np.linalg.norm(innovation)) > 0.30 + 0.15 * self.missed:
+        # 0.20: tighter than chair-leg spacing (~0.3-0.5 m) and looser
+        # than a walker's per-frame motion (~0.15 m at 10 Hz) — slides
+        # across furniture are rejected, humans are not.
+        if float(np.linalg.norm(innovation)) > 0.20 + 0.15 * self.missed:
             self.missed += 1
             return False
         s = h @ self.cov @ h.T + r
@@ -503,8 +506,12 @@ class PersonTracker(Node):
         if current is not None:
             stale = (self.last_scan_stamp is not None and
                      self.last_scan_stamp - current.last_moving > 4.0)
+            # A follow-switch needs a SUSTAINED walker, not one frame of
+            # Kalman jitter: real speed AND real accumulated distance
+            # (with the teleport gate, furniture cannot fake 0.8 m).
             movers = [t for t in confirmed
-                      if t.id != current.id and t.speed > 0.20]
+                      if t.id != current.id and t.speed > 0.35
+                      and t.travel > 0.80]
             if not (stale and movers and self.ego_calm):
                 return current
             self.get_logger().info(
