@@ -38,6 +38,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String
+import json as _json
 
 
 def yaw_from_quaternion(q):
@@ -50,6 +51,28 @@ def wrap(angle):
 
 
 class PersonFollower(Node):
+    def _publish_debug(self):
+        now = self.get_clock().now()
+        person_age = ((now - self.person_stamp).nanoseconds / 1e9
+                      if self.person_stamp is not None else None)
+        self.debug_pub.publish(String(data=_json.dumps({
+            'mode': self.mode,
+            'kturn_phase': self.kturn_phase,
+            'search_done': self.search_done,
+            'person_age_s': None if person_age is None
+            else round(person_age, 2),
+            'person_speed': round(getattr(self, 'person_speed', 0.0), 2),
+            'last_cmd_v': round(getattr(self, 'dbg_cmd_v', 0.0), 3),
+            'last_cmd_kappa': round(getattr(self, 'dbg_cmd_kappa', 0.0), 3),
+            'distance': round(getattr(self, 'dbg_distance', -1.0), 3),
+            'bearing': round(getattr(self, 'dbg_bearing', 0.0), 3),
+            'retry_backoff_active': bool(
+                self.retry_after is not None and now < self.retry_after),
+            'jam_hold_active': False if self.pose is None else
+            (now.nanoseconds / 1e9 < self.jam_hold_until),
+            'max_curvature': self.p['max_curvature_1pm'],
+        }, allow_nan=False)))
+
     def _limits(self, msg):
         try:
             limits = json.loads(msg.data)
@@ -159,6 +182,9 @@ class PersonFollower(Node):
         self.create_subscription(Odometry, self.p['person_topic'],
                                  self._person, 10)
         self.create_subscription(Odometry, '/odom', self._odom, 20)
+        self.debug_pub = self.create_publisher(
+            String, '/person_follower/debug', 5)
+        self.create_timer(0.2, self._publish_debug)
         # Live capability (user: 'it is not learning that it can turn
         # more'): the controller PUBLISHES its learned executable limits;
         # hand-frozen copies here went stale the day capability was
@@ -237,6 +263,9 @@ class PersonFollower(Node):
         dx = self.person.pose.pose.position.x - self.pose[0]
         dy = self.person.pose.pose.position.y - self.pose[1]
         distance = math.hypot(dx, dy)
+        self.dbg_distance = distance
+        self.dbg_bearing = math.atan2(dy, dx) - (
+            self.pose[2] if self.pose else 0.0)
         if seconds < self.jam_hold_until:
             # close-range jam hold: person is across an obstacle; wait
             # for them instead of bumping the gate or asking Smac for
@@ -372,6 +401,8 @@ class PersonFollower(Node):
         command = Twist()
         command.linear.x = float(max(0.0, speed))
         command.angular.z = float(command.linear.x * curvature)
+        self.dbg_cmd_v = command.linear.x
+        self.dbg_cmd_kappa = curvature
         self.command_pub.publish(command)
         self.was_commanding = True
         if abs(command.linear.x) > 0.05 and self.robot_speed < 0.03:
