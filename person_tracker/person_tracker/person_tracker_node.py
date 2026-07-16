@@ -241,13 +241,25 @@ class PersonTracker(Node):
             points = data.get('points', [])
         except (ValueError, TypeError):
             return
+        if not points:
+            # An empty frame (referee saw nobody anywhere) is not
+            # evidence against any specific track — skip. Decaying on
+            # empties + misses eroded a 0.77 endorsement to 0.04 in
+            # 25 s and let the staleness rule hand followership to a
+            # ghost (11:24 run).
+            return
         for track in self.tracks:
             best = 0.0
             for x, y, conf in points:
                 if math.hypot(track.state[0] - x,
                               track.state[1] - y) < 0.5:
                     best = max(best, float(conf))
-            track.person_score += 0.30 * (best - track.person_score)
+            # Asymmetric evidence: a HIT is strong (this referee rarely
+            # fires on furniture), a MISS is weak (it often skips the
+            # real person at this 15 cm mount height). Rise fast, fall
+            # slow — endorsement survives ~20 s of misses.
+            rate = 0.30 if best > track.person_score else 0.06
+            track.person_score += rate * (best - track.person_score)
 
     def _odom(self, msg):
         pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
