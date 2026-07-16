@@ -222,7 +222,9 @@ class PersonFollower(Node):
                     and not self.search_done
                     and self.person_stamp is not None
                     and (now - self.person_stamp).nanoseconds / 1e9
-                    < self.p['search_max_age_s']):
+                    < self.p['search_max_age_s']
+                    and (self.retry_after is None
+                         or now >= self.retry_after)):
                 self.get_logger().info(
                     'person lost: searching at last seen position')
                 self._start_maneuver(self.last_person_xy[0],
@@ -435,6 +437,14 @@ class PersonFollower(Node):
         yaw = math.atan2(dy, dx)
         pose.pose.orientation.z = math.sin(yaw / 2.0)
         pose.pose.orientation.w = math.cos(yaw / 2.0)
+        # retry_after was SET on every abort but never READ — the
+        # 'backing off 2.5 s' was decorative, and an unplannable search
+        # goal re-fired at tick rate (3 full cycles in 300 ms, 23:26
+        # session). Central enforcement: no maneuver starts during the
+        # backoff window.
+        if (self.retry_after is not None
+                and self.get_clock().now() < self.retry_after):
+            return
         goal = NavigateToPose.Goal()
         goal.pose = pose                # default BT: compute once, execute
         self.goal_pending = True
