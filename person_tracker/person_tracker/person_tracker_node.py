@@ -58,6 +58,7 @@ class Track:
         self.last_update = stamp
         self.born = stamp
         self.origin = np.array([x, y])
+        self.freeze_xy = None
         self.last_moving = stamp
         self.travel = 0.0        # max NET displacement from birth position:
         self.confirmed = False   # summed increments would accumulate jitter
@@ -314,8 +315,34 @@ class PersonTracker(Node):
         if (self.robot_speed >= self.p['ego_calm_speed_mps'] or
                 self.robot_yaw_rate >= self.p['ego_calm_yaw_radps']):
             self._ego_active_stamp = stamp
+        was_calm = self.ego_calm
         self.ego_calm = (stamp - self._ego_active_stamp
                          > self.p['ego_calm_settle_s'])
+        # Travel rebasing (15:5x runs: ghosts confirmed right AFTER
+        # maneuvers): position tracking keeps running while the robot
+        # moves - correctly, or we would lose the person - but the
+        # displacement scan smear drags onto a STATIC cluster during
+        # the maneuver was banked as 'travel' on the first trusted
+        # frame after calm returned, and the residual Kalman velocity
+        # booked moving_time. The freeze gated the accrual, not the
+        # displacement. On freeze: snapshot every track's position.
+        # On thaw: shift each origin by the frozen-window displacement
+        # (pre-freeze travel is preserved, frozen drift is not) and
+        # damp the velocity so phantom speed cannot outlive the
+        # maneuver. A real walker re-earns speed from measurements
+        # within a few frames.
+        if not self.ego_calm:
+            for track in self.tracks:
+                if track.freeze_xy is None:
+                    track.freeze_xy = track.state[:2].copy()
+        elif not was_calm:
+            for track in self.tracks:
+                if track.freeze_xy is not None:
+                    track.origin = track.origin + (
+                        track.state[:2] - track.freeze_xy)
+                    track.state[2] *= 0.2
+                    track.state[3] *= 0.2
+                    track.freeze_xy = None
         px, py, pyaw = self.pose
         syaw = pyaw + self.lidar_yaw
         sx = px + math.cos(pyaw) * self.lidar_x - math.sin(pyaw) * self.lidar_y
