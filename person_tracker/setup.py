@@ -13,6 +13,10 @@ setup(
         ('share/' + package_name + '/config', ['config/follow_person.xml']),
         ('share/' + package_name + '/launch',
          ['launch/follow_me.launch.py']),
+        # The neural referee runs under the drspaam venv's interpreter
+        # (torch), so it ships as a data file, not an entry point.
+        ('share/' + package_name + '/scripts',
+         ['person_tracker/person_referee.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

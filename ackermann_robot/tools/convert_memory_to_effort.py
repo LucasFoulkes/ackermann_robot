@@ -21,7 +21,7 @@ import yaml
 
 ROBOT = os.path.expanduser('~/.robot')
 CERT = os.path.expanduser(
-    '~/ros2_ws/src/ackermann_robot/ackermann_robot/config/birth_certificate.yaml')
+    '~/ros2_ws/install/ackermann_robot/share/ackermann_robot/config/birth_certificate.yaml')
 
 
 def load(path):

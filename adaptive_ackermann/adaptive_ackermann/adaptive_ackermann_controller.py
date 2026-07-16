@@ -73,6 +73,17 @@ def angle_difference(a, b):
     return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
+
+def default_birth_certificate():
+    """Resolve the installed vehicle package's certificate; empty if the
+    vehicle package is absent (the launch always passes the real path)."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        return os.path.join(get_package_share_directory('ackermann_robot'),
+                            'config', 'birth_certificate.yaml')
+    except Exception:
+        return ''
+
 class AdaptiveAckermannController(Node):
     def __init__(self):
         super().__init__('adaptive_ackermann_controller')
@@ -305,8 +316,7 @@ class AdaptiveAckermannController(Node):
             # Stage C: gradual effective-steering-state challenger (shadow).
             'learned_dynamics_mode': 'shadow',
             'learned_dynamics_path': '~/.robot/learned_steering_dynamics.yaml',
-            'birth_certificate_path':
-                '~/ros2_ws/src/ackermann_robot/ackermann_robot/config/birth_certificate.yaml',
+            'birth_certificate_path': default_birth_certificate(),
             # Weak-plant adaptation (odom-only, no battery gauge by design):
             # a slow achievability ratio lowers the published Nav2 speed
             # limit toward what the pack/surface can actually sustain, and
@@ -1076,8 +1086,7 @@ class AdaptiveAckermannController(Node):
         """
         self.vehicle_fingerprint = 'unregistered'
         path = os.path.expanduser(str(self.p.get(
-            'birth_certificate_path',
-            '~/ros2_ws/src/ackermann_robot/ackermann_robot/config/birth_certificate.yaml')))
+            'birth_certificate_path') or default_birth_certificate()))
         try:
             with open(path) as stream:
                 certificate = yaml.safe_load(stream) or {}

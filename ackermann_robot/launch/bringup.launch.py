@@ -3,6 +3,8 @@
 import os
 import time
 
+from ament_index_python.packages import get_package_share_directory
+
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
                             IncludeLaunchDescription, RegisterEventHandler)
@@ -159,9 +161,9 @@ def generate_launch_description():
         condition=IfCondition(follow),
         cmd=['nice', '-n', '15',
              os.path.expanduser('~/venvs/drspaam/bin/python'),
-             os.path.expanduser(
-                 '~/ros2_ws/src/ackermann_robot/person_tracker/'
-                 'person_tracker/person_referee.py')],
+             os.path.join(
+                 get_package_share_directory('person_tracker'),
+                 'scripts', 'person_referee.py')],
         # died with exit 1 mid-session 2026-07-16 12:58 (alongside the
         # collision_monitor segfault); without it the tracker loses its
         # anti-furniture judgment silently. Resurrect it.

@@ -2,10 +2,12 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>ackermann_robot</name>
-  <version>0.0.0</version>
-  <description>Clean starting point for the Ackermann robot.</description>
-  <maintainer email="luky@todo.todo">luky</maintainer>
-  <license>TODO</license>
+  <version>1.0.0</version>
+  <description>Vehicle bringup for the self-learning Ackermann crawler:
+    birth certificate, launch files, Nav2 configuration, URDF and
+    operator tools.</description>
+  <maintainer email="lucas@foulkes.studio">Lucas Foulkes</maintainer>
+  <license>MIT</license>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>

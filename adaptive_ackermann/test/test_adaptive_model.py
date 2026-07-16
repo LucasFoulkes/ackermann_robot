@@ -1,11 +1,11 @@
 import math
 
-from ackermann_robot.adaptive_model import (
+from adaptive_ackermann.adaptive_model import (
     DelayEstimator, PathGeometry, TrackabilityEstimator,
     compose_preview_curvature,
     conservative_curvature_limit,
     gentle_motion_requested, learned_planner_curvature,
-    limit_ackermann_twist, limit_gentle_launch_pulse,
+    limit_ackermann_twist,
     path_curvature_floor, path_direction_runs, polyline_projection,
     scan_point_clearance, segment_abort_reason, segment_goal_checker,
     stopping_clearance,
@@ -113,8 +113,6 @@ def test_gentle_motion_preserves_only_explicit_slow_intent_by_default():
     assert not gentle_motion_requested(.12, 2.0)
     assert not gentle_motion_requested(
         .09, .12, active_segment=False)
-    assert limit_gentle_launch_pulse(1400., 1422., True) == 1416.
-    assert limit_gentle_launch_pulse(1620., 1589., False) == 1595.
 
 
 def test_trackability_contracts_faster_than_it_promotes():

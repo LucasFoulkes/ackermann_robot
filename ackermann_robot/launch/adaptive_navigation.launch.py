@@ -84,10 +84,10 @@ def generate_launch_description():
     # median) and turning quality collapsed (2026-07-14). Cornering speed
     # is a tracking-comfort limit and stays fixed in the yaml.
     controller_envelope = {}
-    # The per-vehicle facts file lives in the SOURCE tree (edited without
-    # rebuilds), matching the long-standing controller default.
-    birth_certificate = os.path.expanduser(
-        '~/ros2_ws/src/ackermann_robot/ackermann_robot/config/birth_certificate.yaml')
+    # Installed with the package (standard); rebuild after editing the
+    # vehicle facts (colcon build --packages-select ackermann_robot).
+    birth_certificate = os.path.join(
+        share, 'config', 'birth_certificate.yaml')
     nodes = [
         # Hardware split (2026-07-13): the controller is hardware-free and
         # publishes normalized efforts; the driver owns the PCA9685 (arming,

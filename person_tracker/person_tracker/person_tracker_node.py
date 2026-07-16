@@ -47,6 +47,17 @@ def yaw_from_quaternion(q):
                       1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 
+
+def default_birth_certificate():
+    """Resolve the installed vehicle package's certificate; empty if the
+    vehicle package is absent (the launch always passes the real path)."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        return os.path.join(get_package_share_directory('ackermann_robot'),
+                            'config', 'birth_certificate.yaml')
+    except Exception:
+        return ''
+
 class Track:
     _next_id = 1
 
@@ -146,9 +157,7 @@ class PersonTracker(Node):
     def __init__(self):
         super().__init__('person_tracker')
         defaults = {
-            'birth_certificate_path': (
-                '~/ros2_ws/src/ackermann_robot/ackermann_robot/config/'
-                'birth_certificate.yaml'),
+            'birth_certificate_path': default_birth_certificate(),
             'cell_m': 0.05,
             # Cell occupied this long (and seen in most scans) -> furniture.
             'background_promote_s': 4.0,
