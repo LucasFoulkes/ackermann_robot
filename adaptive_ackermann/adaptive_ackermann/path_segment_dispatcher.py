@@ -593,6 +593,17 @@ class PathSegmentDispatcher(Node):
                      metric['abort_reason'] == CUSP_HANDOVER)
         passed = (completed and xte_p90 <= self.xte_limit and
                   heading_p90 <= self.heading_limit)
+        # Attribution (2026-07-16): a segment that TRACKED cleanly but
+        # ended in a backend abort (costmap flicker, pipeline churn,
+        # gate holds) says nothing about turning capability — yet such
+        # failures contracted the learned radius to 2.1 m at confidence
+        # 1.00 overnight. A FAILURE is only trackability-eligible when
+        # the tracking itself was bad; clean-tracking aborts are
+        # ineligible evidence in either direction.
+        tracking_was_bad = (xte_p90 > self.xte_limit or
+                            heading_p90 > self.heading_limit)
+        if not passed and not tracking_was_bad:
+            eligible = False
         branch = ('forward' if metric['direction'] > 0 else 'reverse')
         branch += '_positive' if metric['curvature'] >= 0.0 else '_negative'
         changed = self.trackability.observe(
