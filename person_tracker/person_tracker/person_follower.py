@@ -162,6 +162,9 @@ class PersonFollower(Node):
             # inflation_radius (0.55) + footprint half-length + margin
             'planner_goal_clearance_m': 0.95,
             'lost_timeout_s': 2.0,
+            # A person must stay lost this long before a search
+            # maneuver launches (identity flips reconfirm in 0.4-3 s).
+            'search_after_s': 4.0,
             # Person vanished: drive once to where they were last seen
             # (if the sighting is recent enough) before giving up.
             'search_max_age_s': 20.0,
@@ -258,6 +261,17 @@ class PersonFollower(Node):
                  < self.p['lost_timeout_s'])
         if not fresh or self.pose is None:
             self._stop_stream()
+            age = ((now - self.person_stamp).nanoseconds / 1e9
+                   if self.person_stamp is not None else math.inf)
+            # Lost-debounce (12:04 run): an identity flip re-confirms
+            # the same person as a new track in 0.4-3 s, but the old
+            # code fired a full search NAVIGATION immediately on every
+            # blip — search, abort, back off, search again, with 1 Hz
+            # replans thrashing the dispatcher underneath. Hold still
+            # through short losses; the tracker's resurrection zones do
+            # the actual work. Search only a person lost for real.
+            if age < self.p['search_after_s']:
+                return
             if self.mode == 'avoid':
                 self._cancel_maneuver('person lost')
             if self.mode == 'search':
@@ -266,8 +280,7 @@ class PersonFollower(Node):
                     and self.last_person_xy is not None
                     and not self.search_done
                     and self.person_stamp is not None
-                    and (now - self.person_stamp).nanoseconds / 1e9
-                    < self.p['search_max_age_s']
+                    and age < self.p['search_max_age_s']
                     and (self.retry_after is None
                          or now >= self.retry_after)):
                 self.get_logger().info(
