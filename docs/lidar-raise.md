@@ -1,5 +1,10 @@
 # Raising the lidar: procedure and rationale
 
+**STATUS: DECLINED 2026-07-16 — the robot stays low by owner decision.**
+Kept as reference. The height-free alternative for referee quality is
+fine-tuning DR-SPAAM on pseudo-labels collected at OUR 16.5 cm mount
+(the authors' self-supervised tooling exists for exactly this).
+
 **Goal:** move the 2D lidar from 16.5 cm to **~37–40 cm** above ground.
 
 **Why:** at 16.5 cm the lidar sees ankles. DR-SPAAM's training data
