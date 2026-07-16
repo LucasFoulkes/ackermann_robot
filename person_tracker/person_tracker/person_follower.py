@@ -65,6 +65,7 @@ class PersonFollower(Node):
 
     def __init__(self):
         super().__init__('person_follower')
+        self.jam_hold_until = 0.0
         defaults = {
             'person_topic': '/person_tracker/person',
             'command_topic': '/cmd_vel_nav_raw',
@@ -115,6 +116,9 @@ class PersonFollower(Node):
             'reorient_timeout_s': 10.0,
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
+            # Below this person-distance a blocked chase HOLDS instead of
+            # planning (Smac cannot solve sub-radius hops; see 23:15).
+            'planner_min_detour_m': 1.3,
             # inflation_radius (0.55) + footprint half-length + margin
             'planner_goal_clearance_m': 0.95,
             'lost_timeout_s': 2.0,
@@ -231,6 +235,12 @@ class PersonFollower(Node):
         dx = self.person.pose.pose.position.x - self.pose[0]
         dy = self.person.pose.pose.position.y - self.pose[1]
         distance = math.hypot(dx, dy)
+        if seconds < self.jam_hold_until:
+            # close-range jam hold: person is across an obstacle; wait
+            # for them instead of bumping the gate or asking Smac for
+            # sub-radius miracles. Re-evaluates every tick after expiry.
+            self._stop_stream()
+            return
         error = distance - self.p['desired_distance_m']
         bearing = wrap(math.atan2(dy, dx) - self.pose[2])
 
@@ -367,10 +377,25 @@ class PersonFollower(Node):
                 self.stalled_since = seconds
             elif seconds - self.stalled_since > self.p['stall_escape_after_s']:
                 self.stalled_since = None
-                # Pursuit is blocked: hand it to Smac IMMEDIATELY — the
+                # Smac Hybrid is structurally bad at sub-meter goals (the
+                # pose sits inside its own min turning radius: 'exceeded
+                # maximum iterations' on a 0.91 m hop, 23:15 session — the
+                # robot froze in 10 s planning loops). Within short range
+                # there is no detour pursuit couldn't drive: the honest
+                # move is to hold facing the person until they come
+                # around. Planner detours only for genuinely distant
+                # blockages.
+                if distance < self.p['planner_min_detour_m']:
+                    self.get_logger().info(
+                        'chase blocked at close range: holding — person '
+                        'is across an obstacle, waiting for them')
+                    self._stop_stream()
+                    self.stalled_since = None
+                    self.jam_hold_until = seconds + 3.0
+                    return
+                # Pursuit is blocked at range: hand it to Smac — the
                 # planner sees the costmap and routes around, while blind
-                # pursuit can only bump the obstacle gate (looked like
-                # 'avoidance not working' in live testing).
+                # pursuit can only bump the obstacle gate.
                 self.get_logger().info(
                     'chase blocked: asking the planner to route around')
                 self._stop_stream()

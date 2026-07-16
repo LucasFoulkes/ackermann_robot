@@ -17,7 +17,7 @@
         <GoalUpdatedController>
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
-            <Wait wait_duration="0.2"/>
+            <Wait wait_duration="0.05"/>
           </RecoveryNode>
         </GoalUpdatedController>
         <!-- A failed committed path must leave this pipeline immediately.
@@ -33,7 +33,7 @@
           <!-- Give a crossing/moving obstacle time to clear before commanding
                any recovery motion. Every retry recomputes from the live pose.
                (Costmap clears removed — see note above.) -->
-          <Wait wait_duration="0.3"/>
+          <Wait wait_duration="0.05"/>
           <BackUp backup_dist="0.25" backup_speed="0.10" error_code_id="{backup_code_id}"/>
         </RoundRobin>
       </ReactiveFallback>
