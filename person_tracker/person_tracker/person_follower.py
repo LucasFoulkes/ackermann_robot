@@ -90,6 +90,7 @@ class PersonFollower(Node):
         super().__init__('person_follower')
         self.jam_hold_until = 0.0
         self.reorient_strikes = 0
+        self.avoid_progress = None
         self.gear = 1
         self.gear_since = 0.0
         defaults = {
@@ -139,10 +140,16 @@ class PersonFollower(Node):
             # plans in ~1-2 s on this Pi. Fail fast, fall back to the
             # reactive 3-point (which handled it fine when the planner
             # finally gave up).
-            # Smac verdicts (success or exceeded-iterations) arrive in
-            # 1-3 s; the rest of a long timeout is the BT re-trying a
-            # plan it already failed. 5 s = one honest attempt.
-            'reorient_timeout_s': 5.0,
+            # Total cap only - a healthy multi-segment route-around
+            # takes 10-20 s to DRIVE. The 5 s "verdict timeout" of
+            # 11:33 killed every SUCCESSFUL maneuver mid-arc (12:05
+            # run: Smac planned all six asks, follower canceled all
+            # six). Failure is detected by the stall check instead.
+            'reorient_timeout_s': 30.0,
+            # No robot displacement for this long while in avoid mode
+            # = planning failed (BT retrying) or execution wedged.
+            # Must exceed cusp standstill (double-tap + settle ~3-4 s).
+            'reorient_stall_s': 7.0,
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
             # ACBB'95 Lyapunov pursuit gains + gear hysteresis (v6)
@@ -187,6 +194,7 @@ class PersonFollower(Node):
         self.goal_handle = None
         self.goal_pending = False
         self.reorient_started = None
+        self.avoid_progress = None
         self.retry_after = None
 
         self.create_subscription(Odometry, self.p['person_topic'],
@@ -239,6 +247,7 @@ class PersonFollower(Node):
             self.goal_handle.cancel_goal_async()
             self.goal_handle = None
         self.reorient_started = None
+        self.avoid_progress = None
         self.mode = 'chase'
 
     def _tick(self):
@@ -292,11 +301,27 @@ class PersonFollower(Node):
             # Route-around: the person IS in the front cone (that is why
             # chase was running), so a bearing-based exit would cancel it
             # instantly (00:50 session: five aborted route-arounds in 16 s).
-            # Exit only on completion, timeout, or the person moving far.
-            if (self.reorient_started is not None and
-                    seconds - self.reorient_started
-                    > self.p['reorient_timeout_s']):
-                self._cancel_maneuver('route-around timeout')
+            # Exit only on completion, stall, total cap, or the person
+            # moving far.
+            if self.pose is not None:
+                if self.avoid_progress is None:
+                    self.avoid_progress = (
+                        self.pose[0], self.pose[1], seconds)
+                elif math.hypot(
+                        self.pose[0] - self.avoid_progress[0],
+                        self.pose[1] - self.avoid_progress[1]) > 0.08:
+                    self.avoid_progress = (
+                        self.pose[0], self.pose[1], seconds)
+            stalled = (self.avoid_progress is not None and
+                       seconds - self.avoid_progress[2]
+                       > self.p['reorient_stall_s'])
+            expired = (self.reorient_started is not None and
+                       seconds - self.reorient_started
+                       > self.p['reorient_timeout_s'])
+            if stalled or expired:
+                self._cancel_maneuver(
+                    'route-around stalled (no progress)' if stalled
+                    else 'route-around timeout')
                 # Strike-out (03:02 loop: jam -> plan -> 10 s timeout ->
                 # jam -> plan..., forever in a tight room): after two
                 # consecutive timeouts the planner has said what it has
@@ -502,6 +527,7 @@ class PersonFollower(Node):
         self.goal_pending = True
         self.mode = mode
         self.reorient_started = self.get_clock().now().nanoseconds / 1e9
+        self.avoid_progress = None
         future = self.navigator.send_goal_async(goal)
         future.add_done_callback(self._goal_response)
 
