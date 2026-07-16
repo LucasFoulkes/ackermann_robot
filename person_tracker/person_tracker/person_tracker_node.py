@@ -164,8 +164,16 @@ class PersonTracker(Node):
             # Ego calm thresholds: motion evidence and follow-target
             # switching only while the robot itself is below these (the
             # odom frame is stable enough to attribute motion to OTHERS).
-            'ego_calm_speed_mps': 0.35,
-            'ego_calm_yaw_radps': 0.5,
+            'ego_calm_speed_mps': 0.20,
+            'ego_calm_yaw_radps': 0.25,
+            # Calm is a DEBOUNCED state: motion evidence re-admits only
+            # after the robot has been continuously still this long.
+            # Full-lock shuffles run ~0.25 m/s at ~0.33 rad/s - under
+            # the old instantaneous thresholds - and the un-deskewed
+            # scan smear minted 1 m of ghost 'travel' during a single
+            # route-around (12:26 run: ghosts 11/18 confirmed mid-
+            # maneuver and stole followership from the person behind).
+            'ego_calm_settle_s': 1.0,
             'min_track_age_confirm_s': 1.0,
             'track_timeout_s': 2.5,   # coast through occlusions (velocity damps)
             'publish_debug_markers': True,
@@ -181,6 +189,7 @@ class PersonTracker(Node):
         self.robot_yaw_rate = 0.0
         self._odom_stamp = None
         self.ego_calm = True
+        self._ego_active_stamp = -1e9
         self.first_scan_stamp = None
         self.last_scan_stamp = None
         self.cells = {}                     # cell -> [first_hit, last_hit,
@@ -293,8 +302,11 @@ class PersonTracker(Node):
             self.first_scan_stamp = stamp
         self.last_scan_stamp = stamp
         self.scan_count += 1
-        self.ego_calm = (self.robot_speed < self.p['ego_calm_speed_mps'] and
-                         self.robot_yaw_rate < self.p['ego_calm_yaw_radps'])
+        if (self.robot_speed >= self.p['ego_calm_speed_mps'] or
+                self.robot_yaw_rate >= self.p['ego_calm_yaw_radps']):
+            self._ego_active_stamp = stamp
+        self.ego_calm = (stamp - self._ego_active_stamp
+                         > self.p['ego_calm_settle_s'])
         px, py, pyaw = self.pose
         syaw = pyaw + self.lidar_yaw
         sx = px + math.cos(pyaw) * self.lidar_x - math.sin(pyaw) * self.lidar_y
