@@ -77,7 +77,7 @@ class Track:
             # forever (classic CV-Kalman runaway).
             self.state[2:] *= 0.5
 
-    def update(self, zx, zy, stamp):
+    def update(self, zx, zy, stamp, trust_motion=True):
         h = np.zeros((2, 4))
         h[0, 0] = h[1, 1] = 1.0
         # The 'measurement' is the leg centroid: gait swings it 10-20 cm
@@ -89,10 +89,17 @@ class Track:
         k = self.cov @ h.T @ np.linalg.inv(s)
         self.state = self.state + k @ innovation
         self.cov = (np.eye(4) - k @ h) @ self.cov
-        self.travel = max(self.travel, float(
-            np.linalg.norm(self.state[:2] - self.origin)))
-        if self.speed > 0.15:
-            self.last_moving = stamp
+        if trust_motion:
+            # Ego-motion attribution gate (2026-07-15): during hard robot
+            # maneuvers, ICP frame micro-shifts displace STATIC clutter
+            # coherently in the odom frame — ghosts earned 'moving'
+            # status and the follower ping-ponged between phantoms.
+            # Position tracking always runs; motion EVIDENCE (travel,
+            # last_moving) accrues only while the ego frame is calm.
+            self.travel = max(self.travel, float(
+                np.linalg.norm(self.state[:2] - self.origin)))
+            if self.speed > 0.15:
+                self.last_moving = stamp
         self.last_update = stamp
         self.missed = 0
 
@@ -121,6 +128,11 @@ class PersonTracker(Node):
             'merged_width_max_m': 0.45,
             'association_gate_m': 0.45,
             'min_travel_confirm_m': 0.40,
+            # Ego calm thresholds: motion evidence and follow-target
+            # switching only while the robot itself is below these (the
+            # odom frame is stable enough to attribute motion to OTHERS).
+            'ego_calm_speed_mps': 0.35,
+            'ego_calm_yaw_radps': 0.5,
             'min_track_age_confirm_s': 1.0,
             'track_timeout_s': 2.5,   # coast through occlusions (velocity damps)
             'publish_debug_markers': True,
@@ -133,6 +145,8 @@ class PersonTracker(Node):
 
         self.pose = None                    # (x, y, yaw) odom frame
         self.robot_speed = 0.0
+        self.robot_yaw_rate = 0.0
+        self.ego_calm = True
         self.first_scan_stamp = None
         self.last_scan_stamp = None
         self.cells = {}                     # cell -> [first_hit, last_hit,
@@ -175,6 +189,7 @@ class PersonTracker(Node):
         self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
                      yaw_from_quaternion(msg.pose.pose.orientation))
         self.robot_speed = abs(msg.twist.twist.linear.x)
+        self.robot_yaw_rate = abs(msg.twist.twist.angular.z)
 
     # ------------------------------------------------------------- scan --
     def _scan(self, msg):
@@ -185,6 +200,8 @@ class PersonTracker(Node):
             self.first_scan_stamp = stamp
         self.last_scan_stamp = stamp
         self.scan_count += 1
+        self.ego_calm = (self.robot_speed < self.p['ego_calm_speed_mps'] and
+                         self.robot_yaw_rate < self.p['ego_calm_yaw_radps'])
         px, py, pyaw = self.pose
         syaw = pyaw + self.lidar_yaw
         sx = px + math.cos(pyaw) * self.lidar_x - math.sin(pyaw) * self.lidar_y
@@ -361,7 +378,7 @@ class PersonTracker(Node):
             if best is not None:
                 unclaimed.remove(best)
                 track.update(candidates[best]['x'], candidates[best]['y'],
-                             stamp)
+                             stamp, trust_motion=self.ego_calm)
                 needed = (track.confirm_travel
                           if track.confirm_travel is not None
                           else self.p['min_travel_confirm_m'])
@@ -444,7 +461,7 @@ class PersonTracker(Node):
                      self.last_scan_stamp - current.last_moving > 4.0)
             movers = [t for t in confirmed
                       if t.id != current.id and t.speed > 0.20]
-            if not (stale and movers):
+            if not (stale and movers and self.ego_calm):
                 return current
             self.get_logger().info(
                 f'follow target {current.id} stationary >4 s while '
