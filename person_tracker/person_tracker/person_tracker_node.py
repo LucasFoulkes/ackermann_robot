@@ -65,6 +65,7 @@ class Track:
         self.confirm_travel = None   # None = use the global parameter
         self.shadowed_until = 0.0    # occlusion-suspect horizon
         self.person_score = 0.0      # neural referee EMA (0 = furniture)
+        self.moving_time = 0.0       # cumulative seconds at walking speed
 
     def predict(self, dt):
         f = np.eye(4)
@@ -105,6 +106,9 @@ class Track:
         self.state = self.state + k @ innovation
         self.cov = (np.eye(4) - k @ h) @ self.cov
         if trust_motion:
+            if self.speed > 0.30:
+                self.moving_time += min(0.3, max(0.0,
+                                                 stamp - self.last_update))
             # Ego-motion attribution gate (2026-07-15): during hard robot
             # maneuvers, ICP frame micro-shifts displace STATIC clutter
             # coherently in the odom frame — ghosts earned 'moving'
@@ -148,6 +152,7 @@ class PersonTracker(Node):
             'merged_width_max_m': 0.45,
             'association_gate_m': 0.45,
             'min_travel_confirm_m': 0.40,
+            'min_moving_confirm_s': 0.8,
             # Ego calm thresholds: motion evidence and follow-target
             # switching only while the robot itself is below these (the
             # odom frame is stable enough to attribute motion to OTHERS).
@@ -486,7 +491,15 @@ class PersonTracker(Node):
                 needed = (track.confirm_travel
                           if track.confirm_travel is not None
                           else self.p['min_travel_confirm_m'])
-                if (track.travel >= needed
+                # Behavioral filter (user's insight 2026-07-16): people
+                # SUSTAIN walking; furniture 'movement' is artifact
+                # blips. Confirmation needs displacement AND cumulative
+                # time at walking speed. Resurrection zones (earned by a
+                # proven walker) keep their fast single-step semantics.
+                walked_enough = (
+                    track.confirm_travel is not None or
+                    track.moving_time >= self.p['min_moving_confirm_s'])
+                if (track.travel >= needed and walked_enough
                         and stamp - track.born
                         >= self.p['min_track_age_confirm_s']):
                     if not track.confirmed:
