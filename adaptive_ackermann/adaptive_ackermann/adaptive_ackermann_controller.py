@@ -496,6 +496,15 @@ class AdaptiveAckermannController(Node):
         self.rolling_entry_speed = 0.0
         self.last_commanded_curvature = 0.0
         self.feedback_ema = 0.0
+        # MRAC-borrowed (2026-07-16): the launch RAMP is a reference
+        # model — its slope is the plant's MEASURED natural post-
+        # breakaway acceleration (plant-limited samples only).
+        self.launch_accel = {'mps2': 0.8, 'observations': 0}
+        self._launch_accel_samples = []
+        self._last_abs_speed = 0.0
+        # Reference-model health monitor EMAs (debug stream only).
+        self.speed_residual_ema = 0.0
+        self.kappa_residual_ema = 0.0
         # ODAAC steal #4: every gated-out learning sample is counted by
         # reason; published at 1 Hz in /controller/debug. Rejection
         # statistics are themselves a diagnostic (a spike in one reason
