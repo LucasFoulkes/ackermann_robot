@@ -1296,6 +1296,16 @@ class AdaptiveAckermannController(Node):
             preview_curvature = geometry.pure_pursuit_curvature(
                 preview_index, direction_sign, lookahead)
             candidate = preview_curvature + feedback
+        # Preview is a TRACKING aid: while not rolling the projection is
+        # least reliable (stationary at a segment start, often at a merge
+        # kink) and composing from it flip-flopped the steering target at
+        # ~3 Hz against the geometry guard — every flip re-armed the
+        # pre-steer hold and reset the launch throttle: the robot could
+        # not START (141 s, zero motion, 18:58 session). Launches steer
+        # to raw RPP (stable); preview engages once rolling.
+        if self.state != 'rolling':
+            self.preview = result
+            return rpp_curvature
         # Degenerate-projection guard: chord math at kinks/segment ends
         # can read path curvature beyond anything Smac can plan (observed:
         # rpp -0.5 vs path_now +2.22 -> commanded +1.31 = a hard
