@@ -915,21 +915,35 @@ class AdaptiveAckermannController(Node):
         front_x = self.p['footprint_front_x_m']
         rear_x = self.p['footprint_rear_x_m']
         half_width = self.p['footprint_half_width_m']
+        # An obstacle counts if it sits in EITHER the measured corridor
+        # (trajectory truth, catches steering lag: 02:39 near-collision)
+        # or the commanded corridor (intent truth, catches measured-kappa
+        # NOISE: at 0.2 m/s creep, ICP yaw jitter bent the corridor off
+        # a dead-ahead chair, the speed envelope released and the robot
+        # hit it at 0.42 m/s - 15:50 run, kappa_cmd 0.00 throughout).
+        # Clearance per side = min over both hypotheses.
+        corridors = {self.corridor_curvature(),
+                     self.last_commanded_curvature}
         for index, distance in enumerate(msg.ranges):
             if not msg.range_min <= distance <= msg.range_max:
                 continue
             angle = msg.angle_min + index * msg.angle_increment
-            external, front_clearance, rear_clearance = scan_point_clearance(
-                distance, angle, lidar_x, lidar_y, lidar_yaw,
-                front_x, rear_x, half_width,
-                curvature=self.corridor_curvature())
-            if not external:
-                continue
-            valid.append(distance)
-            if front_clearance is not None:
-                forward.append(front_clearance)
-            if rear_clearance is not None:
-                reverse.append(rear_clearance)
+            any_external = False
+            for corridor_kappa in corridors:
+                external, front_clearance, rear_clearance = \
+                    scan_point_clearance(
+                        distance, angle, lidar_x, lidar_y, lidar_yaw,
+                        front_x, rear_x, half_width,
+                        curvature=corridor_kappa)
+                if not external:
+                    continue
+                any_external = True
+                if front_clearance is not None:
+                    forward.append(front_clearance)
+                if rear_clearance is not None:
+                    reverse.append(rear_clearance)
+            if any_external:
+                valid.append(distance)
         self.closest = min(valid, default=math.inf)
         self.closest_forward = min(forward, default=math.inf)
         self.closest_reverse = min(reverse, default=math.inf)
