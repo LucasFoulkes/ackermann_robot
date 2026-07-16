@@ -1602,7 +1602,14 @@ class AdaptiveAckermannController(Node):
             self.gentle_coast_active = False
             self.gentle_pulse_active = False
             target_throttle = 0.0
-            target_steering = 0.0; self.learn_start = None
+            # HOLD steering while stopped instead of recentering: every
+            # stop was a pointless center-and-back servo round trip, and
+            # command jitter kept the servo dancing at standstill (0.8
+            # full sweeps of travel in 83 stationary seconds, 01:31 run).
+            # The idle-release in the driver still de-powers after 10 s,
+            # and launch pre-steer sets the real angle before motion.
+            target_steering = self.steering_effort
+            self.learn_start = None
             self.preview = self._empty_preview()
             self.throttle_antiwindup_state = 'inactive'
         else:
