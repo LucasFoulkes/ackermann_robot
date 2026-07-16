@@ -77,7 +77,12 @@ class PersonFollower(Node):
             # kappa 1.15; margin keeps the boundary honest). Exit the
             # 3-point turn only when reachable with extra margin
             # (hysteresis so the boundary cannot dither).
-            'min_turn_radius_m': 0.90,
+            # 0.90 predated the measured-capability promotion: the plant
+            # now executes R 0.77 (kappa 1.30). 0.90 judged persons at
+            # R 0.80-0.89 'unreachable' and fired needless 3-point turns
+            # that CHATTERED against pursuit every ~1 s (19:37 session)
+            # — the 'so bad at turning / can't match speed' complaint.
+            'min_turn_radius_m': 0.80,
             'reach_exit_margin': 1.15,
             # Reactive 3-point turn: full-lock alternating arcs.
             'kturn_crawl_mps': 0.18,

@@ -413,6 +413,23 @@ class PersonTracker(Node):
                               if stamp - d[2] < 6.0]
         self.tracks = [t for t in self.tracks
                        if stamp - t.last_update < self.p['track_timeout_s']]
+        # Twin suppression (2026-07-15): one person's identity kept
+        # splitting into id PAIRS (1<->30, 63<->66, 90<->110 in one
+        # session) — association re-births a fresh track on the person,
+        # the old id coasts 'stale', and the follower ping-pongs between
+        # the person's own twins ('stuck on a ghost' = often the stale
+        # twin). Two confirmed tracks this close are one person: keep
+        # the freshest, inherit followership.
+        keep = []
+        for t in sorted(self.tracks, key=lambda t: stamp - t.last_update):
+            dup = next((k for k in keep if t.confirmed and k.confirmed and
+                        float(np.linalg.norm(t.state[:2] - k.state[:2]))
+                        < 0.55), None)
+            if dup is None:
+                keep.append(t)
+            elif t.id == self.followed_id:
+                self.followed_id = dup.id
+        self.tracks = keep
         # No new tracks until the background grid has matured: during
         # warm-up every furniture cell is still 'unknown' and clutter pairs
         # freely into phantom people.
