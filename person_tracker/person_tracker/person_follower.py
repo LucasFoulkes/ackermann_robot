@@ -472,7 +472,12 @@ class PersonFollower(Node):
         self.dbg_cmd_kappa = curvature
         self.command_pub.publish(command)
         self.was_commanding = True
-        if abs(command.linear.x) > 0.05 and self.robot_speed < 0.03:
+        if abs(command.linear.x) > 0.05 and self.robot_speed < 0.08:
+            # 0.08, and reset only on GENUINE motion below: the old
+            # <0.03 window with any-tick reset meant standstill odom
+            # jitter (0.01-0.05 m/s) restarted the stall clock forever —
+            # the robot stood silently at obstacles, never asking for a
+            # route-around (15:38 run: 95% commanding, one ask in 4 min).
             if self.stalled_since is None:
                 self.stalled_since = seconds
             elif seconds - self.stalled_since > self.p['stall_escape_after_s']:
@@ -504,6 +509,8 @@ class PersonFollower(Node):
                                      mode='avoid')
                 return
         else:
+            # Reached only when not commanding or genuinely moving
+            # (>=0.08) — jitter ticks stay in the stall branch above.
             self.stalled_since = None
             if self.robot_speed > 0.25:
                 self.jam_count = 0
