@@ -142,11 +142,17 @@ adaptive_ackermann_controller:
     # exhaustion path declares defeat. Runaway protection stays with the
     # overspeed tripwire + obstacle gates, and the PI ramps at
     # 0.019/odom so this is headroom, not a step.
-    forward_rolling_min_effort: -1.0
-    reverse_rolling_max_effort: 1.0
+    # +-1.0 (full-authority directive) browned out the motor HAT twice in
+    # one evening on a full pack: stall current at high duty resets the
+    # PCA9685 (MODE1 back to 0x11 = zombie chip, zero PWM). 0.85 is the
+    # electrical ceiling until the HAT power path is beefed up; the
+    # driver now also self-heals chip resets, so a spike degrades to a
+    # logged blip instead of a dead session.
+    forward_rolling_min_effort: -0.85
+    reverse_rolling_max_effort: 0.85
     # Full declared authority: +/-1 by definition in the effort domain.
-    forward_recovery_limit_effort: -1.0
-    reverse_recovery_limit_effort: 1.0
+    forward_recovery_limit_effort: -0.85  # electrical ceiling, see above
+    reverse_recovery_limit_effort: 0.85
     recovery_step_effort: 0.031              # was 10 us
     recovery_limit_dwell_samples: 10
     # 2.0 was the u-s era's 1000 us/s carried over unvalidated — 4-6x
