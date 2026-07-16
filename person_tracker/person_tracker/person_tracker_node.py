@@ -26,6 +26,7 @@ confirms (yellow forever) until they move ~0.4 m; raw scans are not
 deskewed (~4 cm smear at 0.4 m/s — tolerable vs 12 cm legs).
 """
 
+import json
 import math
 import os
 
@@ -37,7 +38,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -172,6 +173,11 @@ class PersonTracker(Node):
         self.create_subscription(Odometry, '/odom', self._odom, 20)
         self.marker_pub = self.create_publisher(
             MarkerArray, '/person_tracker/markers', 5)
+        # Structured forensics (2026-07-15): every ghost hunt so far ran
+        # on sparse INFO lines. Full per-track state, bagged, makes the
+        # next one a table lookup.
+        self.debug_pub = self.create_publisher(
+            String, '/person_tracker/debug', 5)
         self.people_pub = self.create_publisher(
             PoseArray, '/person_tracker/people', 5)
         # Best single person for the follower: CONFIRMED tracks only
@@ -581,6 +587,24 @@ class PersonTracker(Node):
                 dot.color = ColorRGBA(r=0.2, g=0.5, b=1.0, a=0.8)
                 markers.markers.append(dot)
         self.marker_pub.publish(markers)
+        now = self.last_scan_stamp or 0.0
+        self.debug_pub.publish(String(data=json.dumps({
+            'stamp': round(now, 3),
+            'ego_calm': self.ego_calm,
+            'robot_speed': round(self.robot_speed, 3),
+            'robot_yaw_rate': round(self.robot_yaw_rate, 3),
+            'followed_id': self.followed_id,
+            'legs': len(legs), 'candidates': len(candidates),
+            'tracks': [{
+                'id': t.id, 'x': round(float(t.state[0]), 3),
+                'y': round(float(t.state[1]), 3),
+                'speed': round(float(t.speed), 3),
+                'travel': round(float(t.travel), 3),
+                'missed': t.missed, 'confirmed': t.confirmed,
+                'age_s': round(now - t.born, 2),
+                'since_moving_s': round(now - t.last_moving, 2),
+            } for t in self.tracks],
+        }, allow_nan=False)))
         self.people_pub.publish(people)
         if not any(t.confirmed for t in self.tracks):
             self.get_logger().info(

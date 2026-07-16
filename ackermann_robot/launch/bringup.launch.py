@@ -160,6 +160,7 @@ def generate_launch_description():
             '/cmd_vel_nav_raw', '/cmd_vel_nav', '/cmd_vel',
             '/actuator_effort', '/driver/debug', '/speed_limit',
             '/person_tracker/person', '/person_tracker/people',
+            '/person_tracker/debug',
             '/plan', '/unsmoothed_plan', '/controller_segment_plan',
             '/controller/debug', '/controller/limits',
             '/planner_trackability',
