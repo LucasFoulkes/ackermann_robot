@@ -770,8 +770,16 @@ class PersonTracker(Node):
                     return current
             if current.person_score > 0.35:
                 movers = []
+            # RELATIVE override (14:07 run: a chair scored 0.39 — just
+            # over the seniority bar — held followership for 36 s of
+            # standing dead still while the walking user scored 0.96.
+            # The old absolute gate 'current < 0.12' can never fire on
+            # a once-endorsed ghost now that scores decay slowly). The
+            # referee outranks itself: a clearly better-scored person
+            # takes followership even from an endorsed target.
             if (self.ego_calm and humans
-                    and current.person_score < 0.12):
+                    and max(t.person_score for t in humans)
+                    > current.person_score + 0.20):
                 best = max(humans, key=lambda t: t.person_score)
                 self.get_logger().info(
                     f'referee override: track {current.id} scores '
