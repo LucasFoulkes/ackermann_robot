@@ -43,15 +43,7 @@ def main():
     reader = SequentialReader()
     reader.open(StorageOptions(uri=bag, storage_id=''),
                 ConverterOptions('', ''))
-    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
-    events = scans = 0
-    original_info = node.get_logger().info
-
-    def counting_info(text, *args, **kwargs):
-        nonlocal events
-        events += 1
-        return original_info(text, *args, **kwargs)
-    node.get_logger().info = counting_info
+    scans = 0
     while reader.has_next():
         topic, raw, _ = reader.read_next()
         if topic == '/odom':
@@ -59,7 +51,7 @@ def main():
         elif topic == '/scan':
             node._scan(deserialize_message(raw, LaserScan))
             scans += 1
-    print(f'\n=== replay complete: {scans} scans, {events} log events ===')
+    print(f'\n=== replay complete: {scans} scans ===')
     print('final tracks:')
     for t in node.tracks:
         print(f'  id {t.id}: confirmed={t.confirmed} travel={t.travel:.2f} '
