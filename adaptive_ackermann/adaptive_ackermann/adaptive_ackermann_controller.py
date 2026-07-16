@@ -1002,10 +1002,16 @@ class AdaptiveAckermannController(Node):
         if abs(self.cmd.linear.x) > .01:
             self.last_commanded_curvature = self._clamp_curvature(
                 self.cmd.angular.z / self.cmd.linear.x)
-        if (self.cmd.linear.x > 0. and
+        # Gates guard MOTION as well as intent (2026-07-16 03:0x: the
+        # follower's gear latched reverse while momentum still carried
+        # the robot forward at 0.29 m/s — the forward gate switched off
+        # at the exact moment the nose was closing on furniture; contact
+        # at 2.7 cm). Commanding away from a wall while STOPPED remains
+        # allowed: the motion term only bites while actually moving.
+        if ((self.cmd.linear.x > 0. or self.speed > 0.05) and
                 self.closest_forward < self.required_stop_clearance):
             return 0., 0., 'forward obstacle stop'
-        if (self.cmd.linear.x < 0. and
+        if ((self.cmd.linear.x < 0. or self.speed < -0.05) and
                 self.closest_reverse < self.required_stop_clearance):
             return 0., 0., 'reverse obstacle stop'
         requested_v = clamp(
