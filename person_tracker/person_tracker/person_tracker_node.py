@@ -64,6 +64,7 @@ class Track:
         self.missed = 0          # (~0.2 m/s of phantom travel at 10 Hz)
         self.confirm_travel = None   # None = use the global parameter
         self.shadowed_until = 0.0    # occlusion-suspect horizon
+        self.person_score = 0.0      # neural referee EMA (0 = furniture)
 
     def predict(self, dt):
         f = np.eye(4)
@@ -187,6 +188,12 @@ class PersonTracker(Node):
         # next one a table lookup.
         self.debug_pub = self.create_publisher(
             String, '/person_tracker/debug', 5)
+        # Neural referee (DR-SPAAM at ~1 Hz): the judgment geometry
+        # cannot make — a STATIC human vs static furniture. Benchmarked
+        # 2026-07-16: ranks the human 4-10x above ghosts even standing
+        # still. Scores are a RANKING signal, not ground truth.
+        self.create_subscription(
+            String, '/person_referee/detections', self._referee, 5)
         self.people_pub = self.create_publisher(
             PoseArray, '/person_tracker/people', 5)
         # Best single person for the follower: CONFIRMED tracks only
@@ -209,6 +216,20 @@ class PersonTracker(Node):
                 f'birth certificate unavailable ({error}); '
                 'using measured defaults')
             return 0.237, 0.0, math.pi
+
+    def _referee(self, msg):
+        try:
+            data = json.loads(msg.data)
+            points = data.get('points', [])
+        except (ValueError, TypeError):
+            return
+        for track in self.tracks:
+            best = 0.0
+            for x, y, conf in points:
+                if math.hypot(track.state[0] - x,
+                              track.state[1] - y) < 0.5:
+                    best = max(best, float(conf))
+            track.person_score += 0.30 * (best - track.person_score)
 
     def _odom(self, msg):
         pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
@@ -572,13 +593,29 @@ class PersonTracker(Node):
             movers = [t for t in confirmed
                       if t.id != current.id and t.speed > 0.35
                       and t.travel > 0.80]
+            # Referee override (2026-07-16): geometry cannot prefer a
+            # STATIC human over static furniture — if the neural referee
+            # consistently sees a person elsewhere and none where we're
+            # staring, switch even without motion.
+            humans = [t for t in confirmed
+                      if t.id != current.id and t.person_score > 0.35]
+            if (self.ego_calm and humans
+                    and current.person_score < 0.12):
+                best = max(humans, key=lambda t: t.person_score)
+                self.get_logger().info(
+                    f'referee override: track {current.id} scores '
+                    f'{current.person_score:.2f}, track {best.id} scores '
+                    f'{best.person_score:.2f} — switching')
+                self.followed_id = best.id
+                return best
             if not (stale and movers and self.ego_calm):
                 return current
             self.get_logger().info(
                 f'follow target {current.id} stationary >2.5 s while '
                 f'track {movers[0].id} is moving: switching')
+        endorsed = [t for t in confirmed if t.person_score > 0.35]
         moving = [t for t in confirmed if t.speed > 0.15]
-        pool = moving or confirmed
+        pool = endorsed or moving or confirmed
         if self.pose is None:
             best = pool[0]
         else:
@@ -670,6 +707,7 @@ class PersonTracker(Node):
                 'missed': t.missed, 'confirmed': t.confirmed,
                 'age_s': round(now - t.born, 2),
                 'since_moving_s': round(now - t.last_moving, 2),
+                'person_score': round(float(t.person_score), 2),
             } for t in self.tracks],
         }, allow_nan=False)))
         self.people_pub.publish(people)

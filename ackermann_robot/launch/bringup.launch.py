@@ -151,6 +151,17 @@ def generate_launch_description():
     person_follower = Node(
         package='person_tracker', executable='person_follower',
         output='screen', condition=IfCondition(follow))
+    # Neural person referee: torch lives in the drspaam venv, so this
+    # runs as a plain process with that interpreter, heavily nice'd —
+    # it must never starve MOLA/Nav2 (the CPU-contention lesson).
+    person_referee = ExecuteProcess(
+        condition=IfCondition(follow),
+        cmd=['nice', '-n', '15',
+             os.path.expanduser('~/venvs/drspaam/bin/python'),
+             os.path.expanduser(
+                 '~/ros2_ws/src/ackermann_robot/person_tracker/'
+                 'person_tracker/person_referee.py')],
+        output='screen')
 
     flight_recorder = ExecuteProcess(
         condition=IfCondition(record_bag),
@@ -161,6 +172,7 @@ def generate_launch_description():
             '/actuator_effort', '/driver/debug', '/speed_limit',
             '/person_tracker/person', '/person_tracker/people',
             '/person_tracker/debug', '/person_follower/debug',
+            '/person_referee/detections',
             '/plan', '/unsmoothed_plan', '/controller_segment_plan',
             '/controller/debug', '/controller/limits',
             '/planner_trackability',
@@ -180,6 +192,7 @@ def generate_launch_description():
         adaptive_navigation,
         person_tracker,
         person_follower,
+        person_referee,
         flight_recorder,
     ]
     return LaunchDescription([
