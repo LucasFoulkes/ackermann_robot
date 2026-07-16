@@ -361,9 +361,16 @@ class PersonFollower(Node):
                 self.gear = 1
                 self.gear_since = seconds
                 self.get_logger().info('gear latch: forward')
-        v_div = self.gear * max(abs(v_law), 0.1)
+        # Divide by the speed we will actually DRIVE, not a 0.1 floor:
+        # the tiny floor exploded w/v and pinned the clamp on the very
+        # first field run (|kappa| med = p90 = 1.27, arcs at full lock
+        # everywhere = 'steering terrible, very slow'). Saturation still
+        # happens near cusps — that is the law meeting car physics —
+        # but mid-pursuit steering is now proportional.
+        v_for_kappa = max(abs(v_law), 0.15, min(0.30, 0.5 * abs(error)))
         curvature = max(-self.p['max_curvature_1pm'],
-                        min(self.p['max_curvature_1pm'], w_law / v_div))
+                        min(self.p['max_curvature_1pm'],
+                            w_law / (self.gear * v_for_kappa)))
         # Speed magnitude from the law; the floor (which shrinks near the
         # standoff so it cannot orbit) keeps a car that must move to turn
         # moving, and stays above the drivetrain's drag-loaded band.
