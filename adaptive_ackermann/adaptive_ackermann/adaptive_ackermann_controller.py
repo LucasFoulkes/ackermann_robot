@@ -505,6 +505,10 @@ class AdaptiveAckermannController(Node):
         # Reference-model health monitor EMAs (debug stream only).
         self.speed_residual_ema = 0.0
         self.kappa_residual_ema = 0.0
+        # Trust scalar (user's sim, Part 6): 'has my model been right
+        # lately?' from the same residuals. Lose trust fast, earn it
+        # back slow; its ONLY use is scaling the speed envelope.
+        self.model_trust = 1.0
         # ODAAC steal #4: every gated-out learning sample is counted by
         # reason; published at 1 Hz in /controller/debug. Rejection
         # statistics are themselves a diagnostic (a spike in one reason
@@ -731,6 +735,7 @@ class AdaptiveAckermannController(Node):
                     'trim_rate': self.trim_rate,
                     'learning_rejections': self.learning_rejections,
                 'launch_accel_learned': self.launch_accel,
+                'model_trust': round(self.model_trust, 2),
                 'model_residuals': {
                     'speed_mps': round(self.speed_residual_ema, 3),
                     'kappa_1pm': round(self.kappa_residual_ema, 3)},
@@ -1547,6 +1552,13 @@ class AdaptiveAckermannController(Node):
                 self.kappa_residual_ema += 0.1 * (
                     abs(self.yaw_rate / self.speed - predicted_kappa)
                     - self.kappa_residual_ema)
+            surprise = clamp(
+                1.0 - 1.5 * self.speed_residual_ema
+                - 0.8 * self.kappa_residual_ema, 0.0, 1.0)
+            rate = 3.5 if surprise < self.model_trust else 0.3
+            self.model_trust = clamp(
+                self.model_trust
+                + rate * (surprise - self.model_trust) * odom_dt, 0.2, 1.0)
         if (fresh_odom and self.state == 'rolling'
                 and self.odom_outlier and abs(target) > .01):
             self._reject_sample('odom_outlier')
@@ -2530,6 +2542,7 @@ class AdaptiveAckermannController(Node):
                 'rear_clearance_m': self.closest_reverse,
                 'learning_rejections': self.learning_rejections,
                 'launch_accel_learned': self.launch_accel,
+                'model_trust': round(self.model_trust, 2),
                 'model_residuals': {
                     'speed_mps': round(self.speed_residual_ema, 3),
                     'kappa_1pm': round(self.kappa_residual_ema, 3)},
@@ -2576,6 +2589,9 @@ class AdaptiveAckermannController(Node):
         # load, the slew fix), sensing covers odometry latency + filter.
         # Self-lowers when the loop degrades, self-raises as it improves
         # — cruise is EARNED from measurement, not configured ambition.
+        # Trust scaling: a surprised model drives slower until its
+        # predictions come true again (0.45 floor keeps it mobile).
+        limit = limit * (0.45 + 0.55 * self.model_trust)
         if self.delay_estimator.confidence >= 0.5:
             loop_tau = (self.estimated_steering_delay_s +
                         self.p['steering_budget_sensing_lag_s'])

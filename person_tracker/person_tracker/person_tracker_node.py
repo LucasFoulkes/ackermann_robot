@@ -179,6 +179,10 @@ class PersonTracker(Node):
                                             #          hits, frees, static]
         self.tracks = []
         self.recent_deaths = []       # (x, y, stamp) of dead CONFIRMED tracks
+        self.furniture_spots = []     # (x, y, stamp): places where a
+        # confirmed track died furniture-shaped (no walking, no referee
+        # endorsement). The user's TIME FILTER: places that repeatedly
+        # produce non-person confirmations get harder to confirm from.
         self.followed_id = None
         self.last_switch_stamp = 0.0
         self.scan_count = 0
@@ -500,6 +504,15 @@ class PersonTracker(Node):
                 walked_enough = (
                     track.confirm_travel is not None or
                     track.moving_time >= self.p['min_moving_confirm_s'])
+                near_furniture = any(
+                    stamp - fs < 600.0 and math.hypot(
+                        track.state[0] - fx, track.state[1] - fy) < 0.45
+                    for fx, fy, fs in self.furniture_spots)
+                if near_furniture and track.person_score < 0.30:
+                    # a known furniture spot: demand double the walking
+                    # evidence or a referee endorsement
+                    walked_enough = (track.moving_time >=
+                                     2.0 * self.p['min_moving_confirm_s'])
                 if (track.travel >= needed and walked_enough
                         and stamp - track.born
                         >= self.p['min_track_age_confirm_s']):
@@ -518,6 +531,12 @@ class PersonTracker(Node):
                 # deaths were seeding fast-confirm (0.15 m) zones all
                 # over the room — a resurrection CASCADE (confirms at
                 # 0.17-0.21 m travel, ids past 110, 22:41 session).
+                if (track.person_score < 0.15
+                        and track.moving_time < 2.0):
+                    self.furniture_spots.append(
+                        (float(track.state[0]), float(track.state[1]),
+                         stamp))
+                    self.furniture_spots = self.furniture_spots[-40:]
                 if track.travel >= 0.80:
                     self.recent_deaths.append(
                         (float(track.state[0]), float(track.state[1]),

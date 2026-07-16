@@ -351,13 +351,23 @@ class PersonFollower(Node):
         # clearly behind (cos a < -0.25), forward once the nose is
         # within ~30 deg, minimum dwell so noise cannot chatter D<->R
         # (the controller's own 0.5 s debounce still backstops).
+        # kNeed vs kMax (user's sim): the arc curvature required to hit
+        # the target vs the tightest arc the body is BELIEVED to drive
+        # (live from /controller/limits). A target inside the turning
+        # circle is fastest reached by backing up with wheels turned —
+        # even though it is ahead.
+        k_need = 2.0 * abs(math.sin(alpha)) / max(distance, 0.2)
+        k_max = self.p['max_curvature_1pm']
         if seconds - self.gear_since > self.p['gear_dwell_s']:
-            if self.gear > 0 and math.cos(alpha) < -0.25:
+            if self.gear > 0 and (
+                    math.cos(alpha) < -0.25 or
+                    (k_need > 0.95 * k_max and distance < 2.2
+                     and error > 0.1)):
                 self.gear = -1
                 self.gear_since = seconds
                 self.get_logger().info(
                     'gear latch: reverse (person behind/beside)')
-            elif self.gear < 0 and abs(alpha) < 0.55:
+            elif self.gear < 0 and abs(alpha) < 1.2 and k_need <= 0.7 * k_max:
                 self.gear = 1
                 self.gear_since = seconds
                 self.get_logger().info('gear latch: forward')
