@@ -410,7 +410,17 @@ class TrackabilityEstimator:
         else:
             branch['clean_failures'] += 1
             branch['promotion_streak'] = 0
-            if demand <= before + 0.05:
+            if demand < 0.60 * before:
+                # A failure FAR below the believed limit is not
+                # capability evidence — the robot demonstrably tracks
+                # much tighter arcs, so the cause is elsewhere (person
+                # walking through the costmap, gate holds, churn).
+                # Without this floor, two follow-mode route-arounds
+                # failing gentle 0.25 1/m arcs contracted the envelope
+                # to radius 1.54 m and made Smac unplannable in-room
+                # (2026-07-16 morning). Logged as evidence, no update.
+                pass
+            elif demand <= before + 0.05:
                 branch['failure_streak'] += 1
                 # A single segment may be disturbed. Two clean-entry failures
                 # are required, then contract faster than promotion expands.
