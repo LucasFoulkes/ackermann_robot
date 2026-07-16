@@ -342,9 +342,20 @@ class PersonTracker(Node):
         # promotion. Tentative tracks used to as well — so a chair that
         # fooled us once protected its own cells forever and was never
         # learned as furniture (the immortal-ghost loop, 2026-07-16).
-        protected = {self._cell(t.state[0] + dx, t.state[1] + dy)
-                     for t in self.tracks if t.confirmed
-                     for dx in (-0.2, 0.0, 0.2) for dy in (-0.2, 0.0, 0.2)}
+        # The bubble must be CONTIGUOUS: the old sparse offsets made 9
+        # scattered cells with 15 cm gaps — a standing person's feet
+        # landed in the gaps, promoted to furniture in 4 s, the legs
+        # stopped detecting and the confirmed track died 2.5 s later;
+        # ghosts then inherited followership (11:36 run).
+        reach = int(0.35 / cell_m) + 1
+        protected = set()
+        for t in self.tracks:
+            if not t.confirmed:
+                continue
+            base = self._cell(t.state[0], t.state[1])
+            for ix in range(base[0] - reach, base[0] + reach + 1):
+                for iy in range(base[1] - reach, base[1] + reach + 1):
+                    protected.add((ix, iy))
         for cell in free_cells:
             entry = self.cells.get(cell)
             if entry is None:
