@@ -43,6 +43,8 @@ def main():
     # every Nth scan (default 4): the Kalman layer carries identity
     # between classifications, so scoring doesn't need 10 Hz either.
     scan_skip = int(sys.argv[3]) if len(sys.argv) > 3 else 4
+    conf_min = float(sys.argv[4]) if len(sys.argv) > 4 else 0.5
+    model_name = sys.argv[5] if len(sys.argv) > 5 else 'DR-SPAAM'
     # checkpoints were saved on a GPU machine; the authors' Detector
     # calls torch.load without map_location — remap everything to CPU.
     import torch
@@ -50,7 +52,7 @@ def main():
     torch.load = lambda *a, **k: _orig_load(
         *a, **{**k, 'map_location': 'cpu'})
     from dr_spaam.detector import Detector
-    detector = Detector(ckpt, model='DR-SPAAM', gpu=False, stride=2,
+    detector = Detector(ckpt, model=model_name, gpu=False, stride=2,
                         panoramic_scan=True)
     reader = SequentialReader()
     reader.open(StorageOptions(uri=bag, storage_id=''),
@@ -58,6 +60,7 @@ def main():
     pose = None
     fov_set = False
     times = []
+    all_confs = []
     detections = []            # (stamp, [(odom_x, odom_y), ...])
     debug_frames = []
     while reader.has_next():
@@ -92,14 +95,25 @@ def main():
             sx = px + LASER_X * math.cos(pyaw)
             sy = py + LASER_X * math.sin(pyaw)
             world = []
+            all_confs.extend(float(c) for c in dets_cls)
             for (dx, dy), conf in zip(dets_xy, dets_cls):
-                if conf < 0.5:
+                if conf < conf_min:
                     continue
                 # detector frame: x forward, y left of the laser
                 wx = sx + dx * math.cos(pyaw) - dy * math.sin(pyaw)
                 wy = sy + dx * math.sin(pyaw) + dy * math.cos(pyaw)
                 world.append((wx, wy))
             detections.append((stamp, world))
+    print(f'\n=== raw detector output ===')
+    if all_confs:
+        import numpy as _np
+        confs = _np.array(all_confs)
+        print(f'{len(confs)} raw detections; confidence p50 '
+              f'{_np.percentile(confs, 50):.2f} p90 '
+              f'{_np.percentile(confs, 90):.2f} max {confs.max():.2f}; '
+              f'passing {conf_min}: {(confs >= conf_min).sum()}')
+    else:
+        print('detector produced ZERO raw detections')
     print(f'\n=== timing on this machine ===')
     if times:
         times_ms = sorted(t * 1e3 for t in times)
