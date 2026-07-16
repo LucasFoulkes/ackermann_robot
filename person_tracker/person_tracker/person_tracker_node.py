@@ -63,6 +63,7 @@ class Track:
         self.confirmed = False   # summed increments would accumulate jitter
         self.missed = 0          # (~0.2 m/s of phantom travel at 10 Hz)
         self.confirm_travel = None   # None = use the global parameter
+        self.shadowed_until = 0.0    # occlusion-suspect horizon
 
     def predict(self, dt):
         f = np.eye(4)
@@ -247,6 +248,7 @@ class PersonTracker(Node):
         syaw = pyaw + self.lidar_yaw
         sx = px + math.cos(pyaw) * self.lidar_x - math.sin(pyaw) * self.lidar_y
         sy = py + math.sin(pyaw) * self.lidar_x + math.cos(pyaw) * self.lidar_y
+        self.sensor_xy = (sx, sy)
 
         ranges = np.asarray(msg.ranges, dtype=np.float64)
         n = ranges.size
@@ -425,9 +427,38 @@ class PersonTracker(Node):
                                candidates[i]['y'] - track.state[1])
                 if d < best_d:
                     best, best_d = i, d
+            if best is not None:
+                # Occlusion-shadow gate (2026-07-15, the calm-window ghost
+                # factory): a cluster standing in (or within 1 s of) the
+                # lidar shadow of a CLOSER object is being partially
+                # eclipsed — its centroid morphs as the occluder moves,
+                # which no per-frame jump gate can catch (measured: 38
+                # confirms unchanged by the ego gate; walker's shadow
+                # morphed chair clusters at 5-15 cm/frame). Tracking
+                # continues; motion evidence is inadmissible.
+                cx, cy = candidates[best]['x'], candidates[best]['y']
+                if self.sensor_xy is not None:
+                    ox, oy = self.sensor_xy
+                    cand_d = math.hypot(cx - ox, cy - oy)
+                    cand_b = math.atan2(cy - oy, cx - ox)
+                    for other in self.tracks:
+                        if other is track or other.missed > 2:
+                            continue
+                        od = math.hypot(other.state[0] - ox,
+                                        other.state[1] - oy)
+                        if od >= cand_d - 0.30 or od < 0.05:
+                            continue
+                        ob = math.atan2(other.state[1] - oy,
+                                        other.state[0] - ox)
+                        half = math.atan2(0.30, od) + 0.05
+                        if abs(math.atan2(math.sin(cand_b - ob),
+                                          math.cos(cand_b - ob))) < half:
+                            track.shadowed_until = stamp + 1.0
+                            break
             if best is not None and track.update(
                     candidates[best]['x'], candidates[best]['y'],
-                    stamp, trust_motion=self.ego_calm):
+                    stamp, trust_motion=(self.ego_calm and
+                                         stamp >= track.shadowed_until)):
                 # claim only on ACCEPTED update: a rejected teleport must
                 # leave the cluster available for birth/other tracks
                 unclaimed.remove(best)
