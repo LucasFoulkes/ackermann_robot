@@ -109,7 +109,12 @@ def generate_launch_description():
              output='screen', parameters=[{
                  'frontend_action_name': 'follow_path',
                  'backend_action_name': 'follow_path_backend',
-                 'cusp_settle_time_s': 0.30,
+                 # 0.30 was SERIAL with the controller's 0.5 s direction debounce —
+                 # two dwells guarding the same reversal. The debounce alone
+                 # is the certified guard; a token settle only covers the
+                 # backend-goal round-trip (flip decomposition 2026-07-15:
+                 # 2.2 s = decel 0.5 + handoff 0.8 + debounce 0.5 + launch 0.4).
+                 'cusp_settle_time_s': 0.10,
                  'cusp_goal_checker_id': 'cusp_goal_checker',
                  'minimum_executable_segment_m': 0.18,
                  'segment_no_progress_timeout_s': 6.0,
