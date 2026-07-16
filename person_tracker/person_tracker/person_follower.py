@@ -314,8 +314,16 @@ class PersonFollower(Node):
             # Route-around: the person IS in the front cone (that is why
             # chase was running), so a bearing-based exit would cancel it
             # instantly (00:50 session: five aborted route-arounds in 16 s).
-            # Exit only on completion, stall, total cap, or the person
-            # moving far.
+            # Exit only on completion, stall, total cap, the person
+            # moving far — or the person ARRIVING: 12:20 run, the user
+            # walked up to the grinding robot (front clearance 0.16 m)
+            # and it kept executing the stale maneuver toward where
+            # they used to be. Mission accomplished by the person =
+            # maneuver dissolved.
+            if distance < self.p['band_outer_m']:
+                self._cancel_maneuver('person within reach')
+                self.reorient_strikes = 0
+                return
             if self.pose is not None:
                 if self.avoid_progress is None:
                     self.avoid_progress = (
