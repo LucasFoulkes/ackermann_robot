@@ -47,6 +47,28 @@ any error/shutdown. ~100 lines per substrate. The PCA9685 driver is a
 separate repo (`pca9685_effort_driver`) and adds brownout self-heal
 (re-detects a power-cycled chip via its MODE1 register).
 
+## Workspace setup (fresh machine)
+
+The colcon workspace root (`~/ros2_ws`) contains nothing hand-made —
+only `src/` plus the generated `build/ install/ log/`. All documentation
+lives here, in the repo.
+
+```bash
+sudo apt install ros-jazzy-desktop ros-jazzy-nav2-bringup \
+    ros-jazzy-mola-lidar-odometry python3-colcon-common-extensions
+mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
+git clone <this repo>                                   # ackermann_robot
+git clone <driver repo>                                 # pca9685_effort_driver
+git clone https://github.com/Slamtec/sllidar_ros2       # C1 lidar driver
+                                                        # (apt rplidar-ros 2.1.0
+                                                        # cannot start the C1)
+cd ~/ros2_ws && colcon build
+```
+
+The DR-SPAAM referee needs its own venv (torch stays out of the system
+python): `~/venvs/drspaam` with the authors' `dr_spaam` package and a
+checkpoint in `~/opt/drspaam_ckpts/` — only needed for `follow:=true`.
+
 ## How to run
 
 ```bash
