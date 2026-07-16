@@ -27,7 +27,12 @@ planner_server:
       # preference, stated). 2.1 (the old value) starved legitimate
       # maneuvers; do not go back there either.
       reverse_penalty: 1.8
-      change_penalty: 0.10  # let arcs blend instead of concentrating
+      # 0.10 made cusps nearly free: close-quarters plans arrived as
+      # COMBS of 11+ sub-0.30 m shuffle fragments (2026-07-16 12:58 —
+      # unexecutable, entry-gate rejected, follower starved). 0.35
+      # keeps an honest 2-cusp 3-point turn affordable while an
+      # 11-cusp comb costs 10x more than the clean alternative.
+      change_penalty: 0.35
       # 1.30 backfired (user-caught): Hybrid-A* reads it as 'postpone
       # turning' — straight legs with the whole arc crammed into the
       # last 0.5 m (path |k| 0.19 mid vs 0.47 at ends, 01:31 run).

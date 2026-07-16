@@ -101,11 +101,16 @@ def main():
     node = PersonReferee(ckpt, skip)
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt,
+            rclpy.executors.ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy.shutdown() double-faults after ExternalShutdownException
+        # (context already down) — every Ctrl-C then exits 1 and the
+        # launch logs a spurious 'process has died' ERROR.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
