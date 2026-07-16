@@ -367,9 +367,18 @@ class PersonTracker(Node):
             dt = max(0.0, min(0.5, stamp - track.last_update))
             track.predict(dt)
         gate = self.p['association_gate_m']
+        # Followed-track identity persistence (2026-07-15): a walking
+        # person occluded for a few frames left the gate, re-birthed as
+        # a new id, and the old id coasted behind them as a confirmed
+        # trail-ghost (ids 1,2,3,6 in 10 s). The FOLLOWED track may
+        # re-acquire further out, scaled by missed frames (Kalman decays
+        # coasting velocity, so prediction lags a walker).
         unclaimed = list(range(len(candidates)))
         for track in sorted(self.tracks, key=lambda t: not t.confirmed):
-            best, best_d = None, gate
+            effective_gate = gate
+            if track.id == self.followed_id and track.missed > 0:
+                effective_gate = min(0.90, gate + 0.15 * track.missed)
+            best, best_d = None, effective_gate
             for i in unclaimed:
                 d = math.hypot(candidates[i]['x'] - track.state[0],
                                candidates[i]['y'] - track.state[1])

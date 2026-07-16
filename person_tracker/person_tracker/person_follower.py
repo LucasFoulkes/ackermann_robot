@@ -265,6 +265,14 @@ class PersonFollower(Node):
         reachable = xb > 0.05 and arc_radius >= self.p['min_turn_radius_m']
         comfortably = (xb > 0.05 and arc_radius >= self.p['min_turn_radius_m']
                        * self.p['reach_exit_margin'])
+        # At standoff range the arc-through-the-person test is the WRONG
+        # question: anyone slightly off-axis at 0.6 m produces an
+        # impossibly tight arc (R 0.67-0.79 chatter, 19:47 session) — but
+        # the robot doesn't need to DRIVE THROUGH them, it's already
+        # inside the hold band. Maneuvers are for people genuinely away
+        # or behind; nearby-and-ahead means hold/align, never 3-point.
+        if xb > 0.05 and distance <= self.p['band_outer_m']:
+            reachable = comfortably = True
         if self.kturn_phase is None and not reachable:
             self.kturn_phase = 'rev' if xb < 0 else 'fwd'
             self.kturn_phase_until = seconds + self.p['kturn_phase_max_s']
