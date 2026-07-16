@@ -381,12 +381,26 @@ class PersonTracker(Node):
 
     def _point_class(self, x, y):
         """2 = dynamic (was free, now occupied), 1 = unknown, 0 = static."""
-        entry = self.cells.get(self._cell(x, y))
+        cell = self._cell(x, y)
+        entry = self.cells.get(cell)
         if entry is None:
             return 1
         if entry[4]:
             return 0
-        return 2 if entry[3] >= 2 else 1
+        if entry[3] < 2:
+            return 1
+        # Free-then-hit ADJACENT to known furniture is edge noise, not
+        # an arrival: object-boundary cells oscillate hit/free forever
+        # (range jitter + grazing beams), minting phantom dynamic
+        # evidence that re-birthed candidates on static furniture every
+        # few seconds (live session 2026-07-16 10:45). A walking person
+        # crosses open floor; their cells do not hug a static boundary.
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                near = self.cells.get((cell[0] + dx, cell[1] + dy))
+                if near is not None and near[4]:
+                    return 1
+        return 2
 
     # --------------------------------------------------------- clusters --
     def _clusters(self, xs, ys, r, indices):
