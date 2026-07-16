@@ -108,9 +108,15 @@ class PersonFollower(Node):
             'kturn_crawl_mps': 0.18,
             'kturn_phase_max_s': 2.5,
             'kturn_blocked_after_s': 1.2,
-            'reorient_timeout_s': 25.0,
+            # 25 s let a doomed plan freeze the robot; a reachable goal
+            # plans in ~1-2 s on this Pi. Fail fast, fall back to the
+            # reactive 3-point (which handled it fine when the planner
+            # finally gave up).
+            'reorient_timeout_s': 10.0,
             'retry_backoff_s': 2.5,
             'standoff_m': 0.5,
+            # inflation_radius (0.55) + footprint half-length + margin
+            'planner_goal_clearance_m': 0.95,
             'lost_timeout_s': 2.0,
             # Person vanished: drive once to where they were last seen
             # (if the sighting is recent enough) before giving up.
@@ -386,7 +392,16 @@ class PersonFollower(Node):
         dx = target_x - self.pose[0]
         dy = target_y - self.pose[1]
         distance = max(math.hypot(dx, dy), 0.05)
-        scale = max(0.0, (distance - self.p['standoff_m']) / distance)
+        # PLANNER goals must stand clear of the person's own inflation
+        # bubble: a goal at the 0.5 m standoff sits inside the 0.55 m
+        # inflation of the person-as-obstacle, so Smac ground its full
+        # timeout on an unreachable pose, over and over (23:07 session:
+        # three 25 s route-around timeouts back to back, robot frozen).
+        # Direct pursuit keeps the intimate standoff; the planner gets a
+        # goal it can actually reach and pursuit closes the rest.
+        planner_standoff = max(self.p['standoff_m'],
+                               self.p['planner_goal_clearance_m'])
+        scale = max(0.0, (distance - planner_standoff) / distance)
         pose = PoseStamped()
         pose.header.frame_id = 'odom'
         pose.header.stamp = self.get_clock().now().to_msg()
