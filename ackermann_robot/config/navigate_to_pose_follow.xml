@@ -1,0 +1,26 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <!-- Person-follower variant of navigate_to_pose_ackermann.xml: identical
+       tree, but FollowPath selects follow_goal_checker (yaw-free, loose
+       position ball) — the goal is a waypoint near the person, not a pose
+       to align to. Keep the two trees structurally in sync. -->
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="4" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithCommittedPath">
+        <GoalUpdatedController>
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+            <Wait wait_duration="0.05"/>
+          </RecoveryNode>
+        </GoalUpdatedController>
+        <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="follow_goal_checker" error_code_id="{follow_path_error_code}"/>
+      </PipelineSequence>
+      <ReactiveFallback name="AckermannRecovery">
+        <GoalUpdated/>
+        <RoundRobin>
+          <Wait wait_duration="0.05"/>
+          <BackUp backup_dist="0.25" backup_speed="0.10" error_code_id="{backup_code_id}"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>
