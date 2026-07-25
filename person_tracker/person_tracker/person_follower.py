@@ -1,44 +1,45 @@
 #!/usr/bin/env python3
-"""Follow the confirmed person (v5: forward-first, geometric trigger).
+"""Follow the confirmed person (v11: streaming law + Smac, each at its
+proven job).
 
-Two modes, each using the subsystem proven at that job:
+The week of floor evidence, condensed:
+- The streaming Lyapunov law is the ONLY thing that ever made close-range
+  following feel right (09:14 session: sustained tail-first reverse, zero
+  planner asks) — but it is blind, and greedy arc evasion around it
+  produced a new corner-case every session (v8).
+- Smac executes long maneuvers at 0.02-0.075 m XTE — but SHORT goals live
+  inside its min-turning-radius blind spot: grind or maxit-fail (23:15
+  lesson), and pure goal-following (v10) eats short goals for every meal.
+  Its worst grind starved the bond heartbeat and the lifecycle manager
+  executed the whole nav stack (01:23).
 
-CHASE (person single-arc reachable): direct velocity streaming using the
-Park–Kuipers graceful-motion control law — the same law Nav2's Following/
-Docking servers use. Curvature from the egocentric polar error, speed
-automatically collapsing with curvature demand. Reaction latency is one
-10 Hz tick. Commands flow through the normal safety chain
-(/cmd_vel_nav_raw -> adaptive limits -> collision monitor).
+So: LAW when the arc to the person is clear (all close-range pursuit);
+SMAC when geometry blocks the line at range >1.3 m (route-arounds and
+lost-person search — goals long enough to be planned instantly and driven
+cleanly); HOLD when blocked closer (sub-radius blind spot; the person
+resolves it faster than any planner). Ring-escape arcs survive for one
+job: backing out of inscribed cost the robot is standing in.
 
-The mode trigger is GEOMETRIC, not a bearing heuristic: the closed-form
-Ackermann arc radius through the person's body-frame position (the PRM
-paper's edge test, a2=0 for our rear-axle frame). If ONE forward arc
-within the turning limit reaches them, pursue; otherwise run the REACTIVE
-3-POINT TURN — alternating full-lock forward/reverse arcs that rotate the
-nose toward the person while translations cancel (Reeds-Shepp cusp logic,
-executed reactively). Phases end on: person becomes arc-reachable, phase
-blocked (gate/no motion -> switch immediately; walls truncate phases so
-the maneuver squeezes into available space), or timeout. The person's
-live bearing steers every phase — nothing is ever frozen.
-
-Smac remains only for obstacle route-arounds (chase jammed) and
-search-at-last-seen. All commands flow through the normal safety chain.
+Everything below encodes a paid-for lesson; see the per-line comments and
+the memory file before 'simplifying' any of it.
 """
 
 import math
 
 import json
+import os
 
 import rclpy
 from action_msgs.msg import GoalStatus
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import OccupancyGrid
 from nav_msgs.msg import Odometry  # person topic carries velocity too
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String
-import json as _json
 
 
 def yaw_from_quaternion(q):
@@ -55,21 +56,27 @@ class PersonFollower(Node):
         now = self.get_clock().now()
         person_age = ((now - self.person_stamp).nanoseconds / 1e9
                       if self.person_stamp is not None else None)
-        self.debug_pub.publish(String(data=_json.dumps({
+        self.debug_pub.publish(String(data=json.dumps({
             'mode': self.mode,
-            'kturn_phase': self.kturn_phase,
-            'search_done': self.search_done,
+            'band': self.band,
+            'gear': self.gear,
             'person_age_s': None if person_age is None
             else round(person_age, 2),
-            'person_speed': round(getattr(self, 'person_speed', 0.0), 2),
+            'person_speed': round(self.person_speed, 2),
             'last_cmd_v': round(getattr(self, 'dbg_cmd_v', 0.0), 3),
             'last_cmd_kappa': round(getattr(self, 'dbg_cmd_kappa', 0.0), 3),
             'distance': round(getattr(self, 'dbg_distance', -1.0), 3),
             'bearing': round(getattr(self, 'dbg_bearing', 0.0), 3),
-            'retry_backoff_active': bool(
-                self.retry_after is not None and now < self.retry_after),
             'jam_hold_active': False if self.pose is None else
             (now.nanoseconds / 1e9 < self.jam_hold_until),
+            'ring_escape': self.dbg_ring_escape,
+            'search_done': self.search_done,
+            'retry_backoff_active': bool(
+                self.retry_after is not None and now < self.retry_after),
+            'costmap_age_s': None if self.grid is None else round(
+                (now.nanoseconds - (self.grid.header.stamp.sec * 10**9
+                                    + self.grid.header.stamp.nanosec))
+                / 1e9, 1),
             'max_curvature': self.p['max_curvature_1pm'],
         }, allow_nan=False)))
 
@@ -89,8 +96,6 @@ class PersonFollower(Node):
     def __init__(self):
         super().__init__('person_follower')
         self.jam_hold_until = 0.0
-        self.reorient_strikes = 0
-        self.avoid_progress = None
         self.gear = 1
         self.gear_since = 0.0
         defaults = {
@@ -98,81 +103,61 @@ class PersonFollower(Node):
             'command_topic': '/cmd_vel_nav_raw',
             'desired_distance_m': 0.5,
             'arrive_tolerance_m': 0.10,
-            # Distance band with hysteresis (no oscillating at boundaries):
-            # closer than band_inner -> retreat until band_retreat_stop;
-            # farther than band_outer -> chase back to desired; in between ->
-            # hold still.
+            # Distance band with hysteresis: closer than band_inner ->
+            # retreat until band_retreat_stop; farther than band_outer
+            # -> chase back to desired; in between -> hold still.
             'band_inner_m': 0.30,
             'band_retreat_stop_m': 0.45,
             'band_outer_m': 0.75,
             'max_speed_mps': 0.50,
             'speed_gain': 0.8,           # m/s per metre of distance error
             'max_curvature_1pm': 1.15,
-            # Park-Kuipers law: kappa = (k2*bearing + sin(bearing)) / r,
-            # v = vmax / (1 + beta*|kappa|^lambda) — speed collapses as
-            # curvature demand rises (graceful approach, no orbiting).
-            'k2': 2.0,
-            # beta 0.4 allowed ~0.39 m/s at full lock; proven tight-curve
-            # tracking speed is ~0.17-0.20 (same regression as RPP's
-            # regulated radius). 1.5 gives ~0.20 at |kappa|=1.15.
-            # 1.5 collapsed speed to ~0.26 at moderate curvature — with
-            # the 0.40 envelope, falling behind a walking person was
-            # arithmetic (user-observed). 1.0 keeps graceful slowdown.
-            'beta': 1.0,
-            'lambda': 2.0,
-            # Geometric mode trigger: minimum radius of a single forward
-            # arc that counts as 'reachable' (chassis limit ~0.87 m at
-            # kappa 1.15; margin keeps the boundary honest). Exit the
-            # 3-point turn only when reachable with extra margin
-            # (hysteresis so the boundary cannot dither).
-            # 0.90 predated the measured-capability promotion: the plant
-            # now executes R 0.77 (kappa 1.30). 0.90 judged persons at
-            # R 0.80-0.89 'unreachable' and fired needless 3-point turns
-            # that CHATTERED against pursuit every ~1 s (19:37 session)
-            # — the 'so bad at turning / can't match speed' complaint.
             'min_turn_radius_m': 0.80,
-            'reach_exit_margin': 1.15,
-            # Reactive 3-point turn: full-lock alternating arcs.
-            'kturn_crawl_mps': 0.18,
-            'kturn_phase_max_s': 2.5,
-            'kturn_blocked_after_s': 1.2,
-            # 25 s let a doomed plan freeze the robot; a reachable goal
-            # plans in ~1-2 s on this Pi. Fail fast, fall back to the
-            # reactive 3-point (which handled it fine when the planner
-            # finally gave up).
-            # Total cap only - a healthy multi-segment route-around
-            # takes 10-20 s to DRIVE. The 5 s "verdict timeout" of
-            # 11:33 killed every SUCCESSFUL maneuver mid-arc (12:05
-            # run: Smac planned all six asks, follower canceled all
-            # six). Failure is detected by the stall check instead.
-            'reorient_timeout_s': 30.0,
-            # No robot displacement for this long while in avoid mode
-            # = planning failed (BT retrying) or execution wedged.
-            # Must exceed cusp standstill (double-tap + settle ~3-4 s).
-            'reorient_stall_s': 7.0,
-            'retry_backoff_s': 2.5,
-            'standoff_m': 0.5,
-            # ACBB'95 Lyapunov pursuit gains + gear hysteresis (v6)
+            # ACBB'95 Lyapunov pursuit gains + gear hysteresis
             'lyap_ke': 1.3,
             'lyap_ka': 2.5,
             'gear_dwell_s': 0.5,
-            # Below this person-distance a blocked chase HOLDS instead of
-            # planning (Smac cannot solve sub-radius hops; see 23:15).
-            'planner_min_detour_m': 1.3,
-            # inflation_radius (0.55) + footprint half-length + margin
-            'planner_goal_clearance_m': 0.95,
             'lost_timeout_s': 2.0,
-            # A person must stay lost this long before a search
-            # maneuver launches (identity flips reconfirm in 0.4-3 s).
-            'search_after_s': 4.0,
-            # Person vanished: drive once to where they were last seen
-            # (if the sighting is recent enough) before giving up.
-            'search_max_age_s': 20.0,
             'control_rate_hz': 10.0,
-            # Chase-mode jam escape (nose pinned by the obstacle gate).
-            'stall_escape_after_s': 3.0,
-            'escape_duration_s': 2.0,
-            'escape_speed_mps': 0.14,
+            # Ring escape: robot's own cell in inscribed cost -> probes
+            # run escape rules, best clear arc backs it out. Collision
+            # monitor is the hard backstop.
+            'evade_horizon_m': 0.8,
+            # Person = obstacle + 0.55 m inflation. Bubble skips their
+            # INFLATION (cost <= 99); real cells (100) skip only in the
+            # leg core — a box next to the person must stay visible.
+            'person_bubble_m': 0.80,
+            'person_core_m': 0.45,
+            # Stall: commanding but no motion. Must exceed a reverse
+            # launch (settle + breakaway = 5-6 s before 5 cm).
+            'stall_hold_after_s': 6.5,
+            'stall_hold_s': 3.0,
+            # Below this person-distance a blocked chase HOLDS instead
+            # of planning: Smac cannot solve sub-radius hops and there
+            # is no detour pursuit couldn't drive.
+            'planner_min_detour_m': 1.3,
+            # Person-feasibility arithmetic: inflation 0.55 + body 0.25
+            # + tracking lag 0.15 ~= 0.95; goals at 0.95 sat exactly ON
+            # the boundary and flickered unplannable. 1.15 = margin.
+            'planner_goal_clearance_m': 1.15,
+            'standoff_m': 0.5,
+            # 7 s no-displacement = the real failure detector; 60 s cap
+            # only backstops (5 s and 30 s caps each killed WORKING
+            # maneuvers).
+            'reorient_timeout_s': 60.0,
+            'reorient_stall_s': 7.0,
+            'retry_backoff_s': 2.5,
+            # Lost-person search: debounced (identity flips re-confirm
+            # in 0.4-3 s), once per sighting, warm window only.
+            # Corners: search extrapolates along the last velocity — a
+            # vantage INTO the corridor they turned into; retry falls
+            # back to the plain last-seen point. Small pullback: nobody
+            # stands at a search goal.
+            'search_after_s': 4.0,
+            'search_max_age_s': 20.0,
+            'search_lead_s': 1.5,
+            'search_lead_max_m': 1.5,
+            'search_clearance_m': 0.35,
         }
         for key, value in defaults.items():
             self.declare_parameter(key, value)
@@ -181,35 +166,37 @@ class PersonFollower(Node):
         self.person = None
         self.person_speed = 0.0
         self.person_stamp = None
-        self.last_person_xy = None
-        self.search_done = False
         self.pose = None
         self.robot_speed = 0.0
-        self.mode = 'chase'
-        self.kturn_phase = None           # None | 'fwd' | 'rev'
-        self.kturn_phase_until = 0.0
-        self.kturn_blocked_since = None
+        self.mode = 'chase'              # chase | avoid | search
         self.band = 'hold'
         self.was_commanding = False
         self.stalled_since = None
-        self.escape_until = None
-        self.jam_count = 0
+        self.grid = None
+        self.dbg_ring_escape = False
         self.goal_handle = None
         self.goal_pending = False
+        self.superseded = None
         self.reorient_started = None
         self.avoid_progress = None
+        self.reorient_strikes = 0
         self.retry_after = None
+        self.last_person_xy = None
+        self.last_person_vel = (0.0, 0.0)
+        self.search_done = False
+        self.search_attempt = 0
 
         self.create_subscription(Odometry, self.p['person_topic'],
                                  self._person, 10)
         self.create_subscription(Odometry, '/odom', self._odom, 20)
+        self.create_subscription(OccupancyGrid, '/local_costmap/costmap',
+                                 self._costmap, 1)
         self.debug_pub = self.create_publisher(
             String, '/person_follower/debug', 5)
         self.create_timer(0.2, self._publish_debug)
-        # Live capability (user: 'it is not learning that it can turn
-        # more'): the controller PUBLISHES its learned executable limits;
-        # hand-frozen copies here went stale the day capability was
-        # promoted (1.15 vs executable 1.30). Latched topic.
+        # Live capability: the controller publishes its learned
+        # executable limits; hand-frozen copies went stale the day
+        # capability was promoted. Latched topic.
         limit_qos = QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(
@@ -218,10 +205,110 @@ class PersonFollower(Node):
             Twist, self.p['command_topic'], 10)
         self.navigator = ActionClient(self, NavigateToPose,
                                       'navigate_to_pose')
+        # Maneuvers use a BT whose FollowPath selects
+        # follow_goal_checker: arrival heading free, position ball
+        # loose — alignment tails never get driven.
+        self.follow_bt = ''
+        try:
+            candidate = os.path.join(
+                get_package_share_directory('ackermann_robot'),
+                'config', 'navigate_to_pose_follow.xml')
+            if os.path.exists(candidate):
+                self.follow_bt = candidate
+            else:
+                self.get_logger().warning(
+                    f'{candidate} missing; maneuvers use the default BT')
+        except Exception as error:
+            self.get_logger().warning(
+                f'follow BT unavailable ({error}); using default BT')
         self.create_timer(1.0 / self.p['control_rate_hz'], self._tick)
         self.get_logger().info(
-            'person_follower v6: ACBB95 Lyapunov pursuit — one law, '
-            'hysteretic gear, no modes')
+            'person_follower v11: streaming law when clear, Smac when '
+            'blocked at range, hold when blocked close — hybrid')
+
+    # ------------------------------------------------------ costmap arcs --
+    def _costmap(self, msg):
+        self.grid = msg
+
+    def _cost_at(self, x, y):
+        info = self.grid.info
+        col = int((x - info.origin.position.x) / info.resolution)
+        row = int((y - info.origin.position.y) / info.resolution)
+        if not (0 <= col < info.width and 0 <= row < info.height):
+            return 0
+        return max(0, self.grid.data[row * info.width + col])
+
+    def _arc_probe(self, gear, kappa, person_xy, escaping=False):
+        """Sweep one arc through the local costmap.
+
+        (worst_cost, end_x, end_y) or None if not drivable. 100 = real
+        obstacle: always veto. 99 = inscribed ring: veto only from a
+        clear start — a robot standing IN the ring may drive through 99
+        as long as the arc exits it. Person's leg core skipped; their
+        inflation skipped only below lethal.
+        """
+        x, y, th = self.pose
+        # One sample per 5 cm costmap cell: no diagonal cell-hopping.
+        ds = self.p['evade_horizon_m'] / 16.0
+        worst = 0
+        last_cost = 0
+        for _ in range(16):
+            th += gear * ds * kappa
+            x += gear * ds * math.cos(th)
+            y += gear * ds * math.sin(th)
+            cost = self._cost_at(x, y)
+            if person_xy is not None:
+                pd = math.hypot(x - person_xy[0], y - person_xy[1])
+                if pd < self.p['person_core_m']:
+                    continue    # the person's own legs
+                if pd < self.p['person_bubble_m'] and cost < 100:
+                    continue    # their inflation — never a real cell
+            if cost >= 100:
+                return None
+            if cost >= 99 and not escaping:
+                return None
+            worst = max(worst, cost)
+            last_cost = cost
+        if escaping and last_cost >= 99:
+            return None                  # an escape arc must ESCAPE
+        return worst, x, y
+
+    def _ring_escape_arc(self, person_xy, allow_flip):
+        """Best clear ESCAPING arc over both gears, or None (boxed)."""
+        k_max = self.p['max_curvature_1pm']
+        best, best_score = None, None
+        for gear in (self.gear, -self.gear):
+            for i in range(9):
+                kappa = k_max * (i - 4) / 4.0
+                probe = self._arc_probe(gear, kappa, person_xy,
+                                        escaping=True)
+                if probe is None:
+                    continue
+                worst = probe[0]
+                flip_pen = 0.0
+                if gear != self.gear:
+                    # Flips inside the dwell only as a last resort (10 Hz
+                    # re-decision flapped D<->R every tick, 23:47).
+                    flip_pen = 0.3 if allow_flip else 1000.0
+                score = -worst / 100.0 - flip_pen
+                if best_score is None or score > best_score:
+                    best, best_score = (gear, kappa), score
+        return best
+
+    def _law_curvature(self, gear, alpha, error):
+        """Pursuit law in the frame of a gear: forward -> nose bearing,
+        reverse -> tail bearing (v7: 'person behind' is a stable
+        equilibrium tail-first, not a J-turn). Returns (v_law,
+        curvature)."""
+        fb = alpha if gear > 0 else wrap(alpha - math.pi)
+        v_law = self.p['lyap_ke'] * error * math.cos(fb)
+        w_law = (self.p['lyap_ka'] * fb +
+                 self.p['lyap_ke'] * math.sin(fb) * math.cos(fb))
+        v_for = max(abs(v_law), 0.15, min(0.30, 0.5 * abs(error)))
+        curvature = max(-self.p['max_curvature_1pm'],
+                        min(self.p['max_curvature_1pm'],
+                            w_law / (gear * v_for)))
+        return v_law, curvature
 
     # ------------------------------------------------------------ inputs --
     def _person(self, msg):
@@ -231,14 +318,17 @@ class PersonFollower(Node):
         self.person_stamp = self.get_clock().now()
         self.last_person_xy = (msg.pose.pose.position.x,
                                msg.pose.pose.position.y)
+        self.last_person_vel = (msg.twist.twist.linear.x,
+                                msg.twist.twist.linear.y)
         self.search_done = False
+        self.search_attempt = 0
 
     def _odom(self, msg):
         self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y,
                      yaw_from_quaternion(msg.pose.pose.orientation))
         self.robot_speed = abs(msg.twist.twist.linear.x)
 
-    # ------------------------------------------------------------- modes --
+    # ----------------------------------------------------------- control --
     def _stop_stream(self):
         if self.was_commanding:
             self.command_pub.publish(Twist())
@@ -253,6 +343,43 @@ class PersonFollower(Node):
         self.avoid_progress = None
         self.mode = 'chase'
 
+    def _maneuver_supervision(self, seconds):
+        """Shared stall/timeout watch for avoid and search drives.
+        Returns True when the maneuver was killed."""
+        if self.avoid_progress is None:
+            self.avoid_progress = (self.pose[0], self.pose[1], seconds)
+        elif math.hypot(self.pose[0] - self.avoid_progress[0],
+                        self.pose[1] - self.avoid_progress[1]) > 0.08:
+            self.avoid_progress = (self.pose[0], self.pose[1], seconds)
+        stalled = (seconds - self.avoid_progress[2]
+                   > self.p['reorient_stall_s'])
+        expired = (self.reorient_started is not None and
+                   seconds - self.reorient_started
+                   > self.p['reorient_timeout_s'])
+        if stalled or expired:
+            self._cancel_maneuver('stalled (no progress)' if stalled
+                                  else 'timeout')
+            return True
+        return False
+
+    def _blocked_response(self, seconds, distance):
+        """Chase cannot drive at the person: close -> hold for them,
+        far -> one Smac route-around ask (respecting the backoff)."""
+        self._stop_stream()
+        self.stalled_since = None
+        if distance < self.p['planner_min_detour_m']:
+            self.get_logger().info(
+                'chase blocked at close range: holding — person is '
+                'across an obstacle, waiting for them',
+                throttle_duration_sec=5.0)
+            self.jam_hold_until = seconds + self.p['stall_hold_s']
+            return
+        self.get_logger().info(
+            'chase blocked: asking the planner to route around')
+        if self._send_goal(self.person.pose.pose.position.x,
+                           self.person.pose.pose.position.y, seconds):
+            self.mode = 'avoid'
+
     def _tick(self):
         now = self.get_clock().now()
         seconds = now.nanoseconds / 1e9
@@ -261,98 +388,78 @@ class PersonFollower(Node):
                  < self.p['lost_timeout_s'])
         if not fresh or self.pose is None:
             self._stop_stream()
+            self.stalled_since = None
             age = ((now - self.person_stamp).nanoseconds / 1e9
                    if self.person_stamp is not None else math.inf)
-            # Lost-debounce (12:04 run): an identity flip re-confirms
-            # the same person as a new track in 0.4-3 s, but the old
-            # code fired a full search NAVIGATION immediately on every
-            # blip — search, abort, back off, search again, with 1 Hz
-            # replans thrashing the dispatcher underneath. Hold still
-            # through short losses; the tracker's resurrection zones do
-            # the actual work. Search only a person lost for real.
-            if age < self.p['search_after_s']:
-                return
             if self.mode == 'avoid':
                 self._cancel_maneuver('person lost')
             if self.mode == 'search':
-                return                   # keep driving to the last sighting
-            if (self.mode == 'chase' and self.pose is not None
+                if self.goal_handle is None and not self.goal_pending:
+                    self.mode = 'chase'   # rejected/finished elsewhere
+                elif (self.goal_handle is not None
+                        and self._maneuver_supervision(seconds)):
+                    pass                  # killed; retry logic below
+                else:
+                    return                # keep driving to the vantage
+            if age < self.p['search_after_s']:
+                return
+            if (self.mode == 'chase'
+                    and age < self.p['search_max_age_s']
                     and self.last_person_xy is not None
                     and not self.search_done
-                    and self.person_stamp is not None
-                    and age < self.p['search_max_age_s']
+                    and not self.goal_pending
                     and (self.retry_after is None
                          or now >= self.retry_after)):
-                self.get_logger().info(
-                    'person lost: searching at last seen position')
-                self._start_maneuver(self.last_person_xy[0],
-                                     self.last_person_xy[1], mode='search')
-            else:
-                self.get_logger().info(
-                    'holding: no confirmed person (walk a step to '
-                    're-confirm)', throttle_duration_sec=10.0)
+                tx, ty = self.last_person_xy
+                speed = math.hypot(*self.last_person_vel)
+                if self.search_attempt == 0 and speed > 0.15:
+                    # Corners: vantage along their heading — INTO the
+                    # corridor they turned into; retry falls back to
+                    # the plain last-seen point.
+                    lead = min(self.p['search_lead_max_m'],
+                               speed * self.p['search_lead_s'])
+                    tx += self.last_person_vel[0] / speed * lead
+                    ty += self.last_person_vel[1] / speed * lead
+                    self.get_logger().info(
+                        'person lost: searching ahead along their path')
+                else:
+                    self.get_logger().info(
+                        'person lost: driving to last seen position')
+                if self._send_goal(
+                        tx, ty, seconds,
+                        clearance=self.p['search_clearance_m']):
+                    self.mode = 'search'
+                    self.search_attempt += 1
+                return
+            self.get_logger().info(
+                'holding: no confirmed person (walk a step to '
+                're-confirm)', throttle_duration_sec=10.0)
             return
         dx = self.person.pose.pose.position.x - self.pose[0]
         dy = self.person.pose.pose.position.y - self.pose[1]
         distance = math.hypot(dx, dy)
         self.dbg_distance = distance
-        self.dbg_bearing = math.atan2(dy, dx) - (
-            self.pose[2] if self.pose else 0.0)
+        self.dbg_bearing = math.atan2(dy, dx) - self.pose[2]
         if seconds < self.jam_hold_until:
-            # close-range jam hold: person is across an obstacle; wait
-            # for them instead of bumping the gate or asking Smac for
-            # sub-radius miracles. Re-evaluates every tick after expiry.
             self._stop_stream()
             return
         error = distance - self.p['desired_distance_m']
         bearing = wrap(math.atan2(dy, dx) - self.pose[2])
-
         if self.mode == 'search':
-            # Person reacquired while searching: back to direct behavior.
             self._cancel_maneuver('person reacquired')
         if self.mode == 'avoid':
-            # Route-around: the person IS in the front cone (that is why
-            # chase was running), so a bearing-based exit would cancel it
-            # instantly (00:50 session: five aborted route-arounds in 16 s).
-            # Exit only on completion, stall, total cap, the person
-            # moving far — or the person ARRIVING: 12:20 run, the user
-            # walked up to the grinding robot (front clearance 0.16 m)
-            # and it kept executing the stale maneuver toward where
-            # they used to be. Mission accomplished by the person =
-            # maneuver dissolved.
+            # Exits: person arriving dissolves the mission; stall and
+            # total cap catch failure; completion via _result.
             if distance < self.p['band_outer_m']:
                 self._cancel_maneuver('person within reach')
                 self.reorient_strikes = 0
                 return
-            if self.pose is not None:
-                if self.avoid_progress is None:
-                    self.avoid_progress = (
-                        self.pose[0], self.pose[1], seconds)
-                elif math.hypot(
-                        self.pose[0] - self.avoid_progress[0],
-                        self.pose[1] - self.avoid_progress[1]) > 0.08:
-                    self.avoid_progress = (
-                        self.pose[0], self.pose[1], seconds)
-            stalled = (self.avoid_progress is not None and
-                       seconds - self.avoid_progress[2]
-                       > self.p['reorient_stall_s'])
-            expired = (self.reorient_started is not None and
-                       seconds - self.reorient_started
-                       > self.p['reorient_timeout_s'])
-            if stalled or expired:
-                self._cancel_maneuver(
-                    'route-around stalled (no progress)' if stalled
-                    else 'route-around timeout')
-                # Strike-out (03:02 loop: jam -> plan -> 10 s timeout ->
-                # jam -> plan..., forever in a tight room): after two
-                # consecutive timeouts the planner has said what it has
-                # to say — hold facing the person and let THEM resolve
-                # the geometry, re-arming when they move.
+            if self._maneuver_supervision(seconds):
                 self.reorient_strikes += 1
                 if self.reorient_strikes >= 2:
                     self.get_logger().info(
-                        'route-around struck out twice: waiting for the '
-                        'person to come around')
+                        'route-around struck out twice: waiting for '
+                        'the person to come around')
                     self.jam_hold_until = seconds + 8.0
                     self.reorient_strikes = 0
             elif self.goal_handle is None and not self.goal_pending:
@@ -371,8 +478,7 @@ class PersonFollower(Node):
         if self.band == 'hold' and distance > self.p['band_outer_m']:
             self.band = 'chase'
         if self.band == 'retreat':
-            # Straight away from the person, whichever end they crowd
-            # (front person -> back up; rear person -> pull forward).
+            # Straight away from the person, whichever end they crowd.
             command = Twist()
             magnitude = min(0.35, self.p['speed_gain']
                             * (self.p['band_retreat_stop_m'] - distance))
@@ -386,84 +492,87 @@ class PersonFollower(Node):
             self._stop_stream()
             self.stalled_since = None
             return
-        if self.escape_until is not None:
-            if seconds < self.escape_until:
-                command = Twist()
-                command.linear.x = -self.p['escape_speed_mps']
-                self.command_pub.publish(command)
-                self.was_commanding = True
-                return
-            self.escape_until = None
-            self.stalled_since = None
-        # ---- Follower v6: ACBB'95 Lyapunov pursuit (from the user's
-        # simulation). ONE law, no modes: v = ke*d*cos(a), w = ka*a +
-        # ke*sin(a)*cos(a). Reversal is not a special case — cos(a) < 0
-        # makes v negative when the person is behind/sharply aside, and
-        # swing-backs / 3-point-like moves EMERGE. The law is Lyapunov-
-        # stable: the distance to the target never increases. This
-        # replaces the arc-reachability test, the kturn phase machine,
-        # and the Park-Kuipers law (v5) — the modes we spent two nights
-        # debugging individually.
+        # --------------------------------------------------- pursuit law --
         alpha = bearing
-        v_law = self.p['lyap_ke'] * error * math.cos(alpha)
-        w_law = (self.p['lyap_ka'] * alpha +
-                 self.p['lyap_ke'] * math.sin(alpha) * math.cos(alpha))
-        # A car cannot pivot at the cusp, so the gear is a HYSTERETIC
-        # commitment to the law's sign: reverse only when the person is
-        # clearly behind (cos a < -0.25), forward once the nose is
-        # within ~30 deg, minimum dwell so noise cannot chatter D<->R
-        # (the controller's own 0.5 s debounce still backstops).
-        # kNeed vs kMax (user's sim): the arc curvature required to hit
-        # the target vs the tightest arc the body is BELIEVED to drive
-        # (live from /controller/limits). A target inside the turning
-        # circle is fastest reached by backing up with wheels turned —
-        # even though it is ahead.
+        person_xy = (self.person.pose.pose.position.x,
+                     self.person.pose.pose.position.y)
+        escaping = (self.grid is not None and
+                    self._cost_at(self.pose[0], self.pose[1]) >= 99)
         k_need = 2.0 * abs(math.sin(alpha)) / max(distance, 0.2)
         k_max = self.p['max_curvature_1pm']
+        # Symmetric gear latch (+/-0.20 band + dwell = chatter guard,
+        # not preference); never latch into a blocked direction.
         if seconds - self.gear_since > self.p['gear_dwell_s']:
-            if self.gear > 0 and (
-                    math.cos(alpha) < -0.25 or
-                    (k_need > 1.6 * k_max and distance < 1.4
-                     and error > 0.1)):
-                # Reverse only for targets DEEP inside the turning
-                # circle at close quarters. A side target marginally
-                # inside it (kNeed ~ kMax) is reached by sweeping the
-                # forward full-lock arc — alpha falls, kNeed falls,
-                # done in seconds. The old 0.95x bar latched reverse
-                # for any side target within 2.2 m; reverse then jammed
-                # on blind-side clutter and fell into the route-around
-                # ritual: 45 s to approach a person standing 2 m away
-                # (11:30 run).
-                self.gear = -1
+            cos_a = math.cos(alpha)
+            deep_inside = (k_need > 1.6 * k_max and distance < 1.4
+                           and error > 0.1)
+            candidate = 0
+            if self.gear > 0 and (cos_a < -0.20 or deep_inside):
+                candidate = -1
+            elif self.gear < 0 and cos_a > 0.20 and not deep_inside:
+                candidate = 1
+            if candidate != 0 and self.grid is not None:
+                _, cand_kappa = self._law_curvature(candidate, alpha,
+                                                    error)
+                if self._arc_probe(candidate, cand_kappa, person_xy,
+                                   escaping) is None:
+                    self.get_logger().info(
+                        'bearing prefers %s but that way is blocked' %
+                        ('reverse' if candidate < 0 else 'forward'),
+                        throttle_duration_sec=2.0)
+                    candidate = 0
+            if candidate != 0:
+                self.gear = candidate
                 self.gear_since = seconds
+                self.stalled_since = None
                 self.get_logger().info(
-                    'gear latch: reverse (person behind/beside)')
-            elif self.gear < 0 and abs(alpha) < 1.2 and k_need <= 0.7 * k_max:
-                self.gear = 1
-                self.gear_since = seconds
-                self.get_logger().info('gear latch: forward')
-        # Divide by the speed we will actually DRIVE, not a 0.1 floor:
-        # the tiny floor exploded w/v and pinned the clamp on the very
-        # first field run (|kappa| med = p90 = 1.27, arcs at full lock
-        # everywhere = 'steering terrible, very slow'). Saturation still
-        # happens near cusps — that is the law meeting car physics —
-        # but mid-pursuit steering is now proportional.
-        v_for_kappa = max(abs(v_law), 0.15, min(0.30, 0.5 * abs(error)))
-        curvature = max(-self.p['max_curvature_1pm'],
-                        min(self.p['max_curvature_1pm'],
-                            w_law / (self.gear * v_for_kappa)))
-        # Speed magnitude from the law; the floor (which shrinks near the
-        # standoff so it cannot orbit) keeps a car that must move to turn
-        # moving, and stays above the drivetrain's drag-loaded band.
+                    'gear latch: %s' %
+                    ('forward' if candidate > 0
+                     else 'reverse (person behind/beside)'))
+        v_law, curvature = self._law_curvature(self.gear, alpha, error)
+        # ------------------------------------------- blocked-arc branch --
+        self.dbg_ring_escape = False
+        if (self.grid is not None
+                and self._arc_probe(self.gear, curvature, person_xy,
+                                    escaping) is None):
+            if escaping:
+                choice = self._ring_escape_arc(
+                    person_xy,
+                    allow_flip=(seconds - self.gear_since
+                                > self.p['gear_dwell_s']))
+                if choice is None:
+                    self.get_logger().info(
+                        'boxed in: every arc blocked — holding',
+                        throttle_duration_sec=5.0)
+                    self._stop_stream()
+                    self.stalled_since = None
+                    self.jam_hold_until = seconds + 1.0
+                    return
+                self.dbg_ring_escape = True
+                escape_gear, curvature = choice
+                if escape_gear != self.gear:
+                    self.gear = escape_gear
+                    self.gear_since = seconds
+                    self.stalled_since = None
+                    self.get_logger().info(
+                        'gear latch: %s (ring escape)' %
+                        ('forward' if escape_gear > 0 else 'reverse'))
+                self.get_logger().info(
+                    f'ring escape: gear {self.gear:+d} '
+                    f'kappa {curvature:+.2f}',
+                    throttle_duration_sec=2.0)
+            else:
+                # Clear start, blocked arc: Smac's job (at range).
+                self._blocked_response(seconds, distance)
+                return
+        # ------------------------------------------------------- command --
         floor = max(0.15, min(0.30, 0.5 * abs(error)))
-        cap = (self.p['max_speed_mps'] if self.gear > 0
-               else min(self.p['max_speed_mps'], 0.35))
-        magnitude = max(floor, min(cap, abs(v_law)))
-        if self.gear > 0:
-            # Speed matching: the person's pace plus a catch-up term.
-            magnitude = min(magnitude,
-                            self.person_speed
-                            + self.p['speed_gain'] * error)
+        magnitude = max(floor, min(self.p['max_speed_mps'], abs(v_law)))
+        # Speed matching in EITHER gear — back and forth symmetric.
+        magnitude = min(magnitude,
+                        self.person_speed + self.p['speed_gain'] * error)
+        if self.dbg_ring_escape:
+            magnitude = min(magnitude, 0.25)
         speed = self.gear * magnitude
         command = Twist()
         command.linear.x = float(speed)
@@ -473,103 +582,96 @@ class PersonFollower(Node):
         self.command_pub.publish(command)
         self.was_commanding = True
         if abs(command.linear.x) > 0.05 and self.robot_speed < 0.08:
-            # 0.08, and reset only on GENUINE motion below: the old
-            # <0.03 window with any-tick reset meant standstill odom
-            # jitter (0.01-0.05 m/s) restarted the stall clock forever —
-            # the robot stood silently at obstacles, never asking for a
-            # route-around (15:38 run: 95% commanding, one ask in 4 min).
+            # Reset only on GENUINE motion below — standstill odom
+            # jitter restarted the clock forever under <0.03.
             if self.stalled_since is None:
                 self.stalled_since = seconds
-            elif seconds - self.stalled_since > self.p['stall_escape_after_s']:
-                self.stalled_since = None
-                # Smac Hybrid is structurally bad at sub-meter goals (the
-                # pose sits inside its own min turning radius: 'exceeded
-                # maximum iterations' on a 0.91 m hop, 23:15 session — the
-                # robot froze in 10 s planning loops). Within short range
-                # there is no detour pursuit couldn't drive: the honest
-                # move is to hold facing the person until they come
-                # around. Planner detours only for genuinely distant
-                # blockages.
-                if distance < self.p['planner_min_detour_m']:
-                    self.get_logger().info(
-                        'chase blocked at close range: holding — person '
-                        'is across an obstacle, waiting for them')
-                    self._stop_stream()
-                    self.stalled_since = None
-                    self.jam_hold_until = seconds + 3.0
-                    return
-                # Pursuit is blocked at range: hand it to Smac — the
-                # planner sees the costmap and routes around, while blind
-                # pursuit can only bump the obstacle gate.
+            elif (seconds - self.stalled_since
+                  > self.p['stall_hold_after_s']):
+                # Probe-clear commands, no motion: the gate sees what
+                # the probes cannot. Same decision as a blocked arc.
                 self.get_logger().info(
-                    'chase blocked: asking the planner to route around')
-                self._stop_stream()
-                self._start_maneuver(self.person.pose.pose.position.x,
-                                     self.person.pose.pose.position.y,
-                                     mode='avoid')
-                return
+                    'chase pinned: command produces no motion')
+                self._blocked_response(seconds, distance)
         else:
-            # Reached only when not commanding or genuinely moving
-            # (>=0.08) — jitter ticks stay in the stall branch above.
             self.stalled_since = None
-            if self.robot_speed > 0.25:
-                self.jam_count = 0
 
     # ---------------------------------------------------------- maneuver --
-    def _start_maneuver(self, target_x, target_y, mode):
+    def _send_goal(self, target_x, target_y, seconds, clearance=None):
+        """Send a NavigateToPose goal; True when actually dispatched.
+
+        clearance defaults to the person-follow pullback; searches pass
+        a small one (nobody stands at a search goal)."""
         if not self.navigator.server_is_ready():
             self.get_logger().warning('navigate_to_pose not ready',
                                       throttle_duration_sec=5.0)
-            return
+            return False
+        if (self.retry_after is not None
+                and self.get_clock().now() < self.retry_after):
+            return False
         dx = target_x - self.pose[0]
         dy = target_y - self.pose[1]
         distance = max(math.hypot(dx, dy), 0.05)
-        # PLANNER goals must stand clear of the person's own inflation
-        # bubble: a goal at the 0.5 m standoff sits inside the 0.55 m
-        # inflation of the person-as-obstacle, so Smac ground its full
-        # timeout on an unreachable pose, over and over (23:07 session:
-        # three 25 s route-around timeouts back to back, robot frozen).
-        # Direct pursuit keeps the intimate standoff; the planner gets a
-        # goal it can actually reach and pursuit closes the rest.
-        planner_standoff = max(self.p['standoff_m'],
-                               self.p['planner_goal_clearance_m'])
-        scale = max(0.0, (distance - planner_standoff) / distance)
+        if clearance is None:
+            clearance = max(self.p['standoff_m'],
+                            self.p['planner_goal_clearance_m'])
+        scale = max(0.0, (distance - clearance) / distance)
         pose = PoseStamped()
         pose.header.frame_id = 'odom'
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = self.pose[0] + dx * scale
         pose.pose.position.y = self.pose[1] + dy * scale
-        yaw = math.atan2(dy, dx)
+        # Goal heading = the forward-bias lever: Smac (1.3.11, no
+        # goal_heading_mode) must PLAN to this yaw even though the loose
+        # checker ignores it at arrival. Target behind -> rear-first
+        # heading, so straight reverse is the cheap plan instead of a
+        # forward loop-around.
+        bearing = math.atan2(dy, dx)
+        rel = wrap(bearing - self.pose[2])
+        yaw = bearing if math.cos(rel) >= 0.0 else wrap(bearing + math.pi)
         pose.pose.orientation.z = math.sin(yaw / 2.0)
         pose.pose.orientation.w = math.cos(yaw / 2.0)
-        # retry_after was SET on every abort but never READ — the
-        # 'backing off 2.5 s' was decorative, and an unplannable search
-        # goal re-fired at tick rate (3 full cycles in 300 ms, 23:26
-        # session). Central enforcement: no maneuver starts during the
-        # backoff window.
-        if (self.retry_after is not None
-                and self.get_clock().now() < self.retry_after):
-            return
         goal = NavigateToPose.Goal()
-        goal.pose = pose                # default BT: compute once, execute
+        goal.pose = pose
+        goal.behavior_tree = self.follow_bt  # yaw-free arrival
+        if self.goal_handle is not None:
+            # About to preempt: the predecessor reports ABORTED; that
+            # result must be ignored even if it arrives before the new
+            # goal's acceptance.
+            self.superseded = self.goal_handle
         self.goal_pending = True
-        self.mode = mode
-        self.reorient_started = self.get_clock().now().nanoseconds / 1e9
+        self.reorient_started = seconds
         self.avoid_progress = None
         future = self.navigator.send_goal_async(goal)
         future.add_done_callback(self._goal_response)
+        return True
 
     def _goal_response(self, future):
         self.goal_pending = False
         handle = future.result()
         if handle is None or not handle.accepted:
-            self.get_logger().warning('maneuver goal rejected')
-            self.mode = 'chase'
+            # Rejections back off like aborts: a downed action server
+            # rejects instantly; without this the search reject-spun at
+            # 5 Hz against a dead stack (01:23 run).
+            self.retry_after = self.get_clock().now() + \
+                rclpy.duration.Duration(seconds=self.p['retry_backoff_s'])
+            self.get_logger().warning(
+                f"goal rejected; backing off {self.p['retry_backoff_s']} s")
+            if self.mode in ('avoid', 'search'):
+                self.mode = 'chase'
             return
         self.goal_handle = handle
-        handle.get_result_async().add_done_callback(self._result)
+        handle.get_result_async().add_done_callback(
+            lambda fut, h=handle: self._result(fut, h))
 
-    def _result(self, future):
+    def _result(self, future, handle):
+        # Results attributed to THEIR goal (preempted predecessors
+        # report ABORTED — bookkeeping, not failure).
+        if handle is self.superseded:
+            self.superseded = None
+            return
+        if handle is not self.goal_handle:
+            return
         try:
             status = future.result().status
         except Exception:
@@ -580,17 +682,13 @@ class PersonFollower(Node):
                 rclpy.duration.Duration(seconds=self.p['retry_backoff_s'])
             self.get_logger().warning(
                 f"maneuver aborted; backing off {self.p['retry_backoff_s']} s")
-        if self.mode == 'search':
-            if status == GoalStatus.STATUS_ABORTED:
-                # Planner failed (e.g. smeared costmap): allow another try
-                # after the backoff while the sighting is still fresh.
-                self.get_logger().info('search aborted; will retry')
-            else:
-                self.reorient_strikes = 0
-                self.search_done = True
+        elif status == GoalStatus.STATUS_SUCCEEDED:
+            self.reorient_strikes = 0
+            if self.mode == 'search':
+                self.search_done = True   # one search per sighting
                 self.get_logger().info(
                     'search finished; holding for the person')
-        if self.mode in ('search', 'avoid'):
+        if self.mode in ('avoid', 'search'):
             self.mode = 'chase'
 
 
