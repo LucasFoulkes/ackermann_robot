@@ -33,7 +33,8 @@ import os
 import numpy as np
 import rclpy
 import yaml
-from geometry_msgs.msg import Pose, PoseArray, PoseStamped
+from adaptive_ackermann_msgs.msg import EffortCommand
+from geometry_msgs.msg import Pose, PoseArray
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -193,6 +194,18 @@ class PersonTracker(Node):
             # route-around (12:26 run: ghosts 11/18 confirmed mid-
             # maneuver and stole followership from the person behind).
             'ego_calm_settle_s': 1.0,
+            # Actuation cross-check (23:55 session: person lost forever):
+            # a person walking close to the PARKED robot dominates the
+            # scan and lidar odometry hallucinates ego speed right at the
+            # calm threshold (robot_speed 0.21-0.22 logged with zero
+            # commands) -> calm never settles -> every step of walking
+            # evidence discarded -> re-confirmation structurally
+            # impossible. The controller's actual drive effort is ground
+            # truth this crawler cannot defy on a flat floor: no drive
+            # effort for this long => the robot is NOT moving, whatever
+            # odom claims => force calm.
+            'effort_topic': '/actuator_effort',
+            'actuation_idle_calm_s': 1.0,
             'min_track_age_confirm_s': 1.0,
             'track_timeout_s': 2.5,   # coast through occlusions (velocity damps)
             'publish_debug_markers': True,
@@ -209,6 +222,7 @@ class PersonTracker(Node):
         self._odom_stamp = None
         self.ego_calm = True
         self._ego_active_stamp = -1e9
+        self._effort_active_stamp = None
         self.first_scan_stamp = None
         self.last_scan_stamp = None
         self.cells = {}                     # cell -> [first_hit, last_hit,
@@ -227,6 +241,8 @@ class PersonTracker(Node):
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self.create_subscription(LaserScan, '/scan', self._scan, qos)
         self.create_subscription(Odometry, '/odom', self._odom, 20)
+        self.create_subscription(EffortCommand, self.p['effort_topic'],
+                                 self._effort, 10)
         self.marker_pub = self.create_publisher(
             MarkerArray, '/person_tracker/markers', 5)
         # Structured forensics (2026-07-15): every ghost hunt so far ran
@@ -312,6 +328,19 @@ class PersonTracker(Node):
         self.pose = pose
         self._odom_stamp = stamp
 
+    def _effort(self, msg):
+        if abs(msg.drive_effort) > 0.03:
+            self._effort_active_stamp = (
+                self.get_clock().now().nanoseconds / 1e9)
+
+    def _actuation_idle(self, stamp):
+        """True when no meaningful drive effort has been commanded for
+        actuation_idle_calm_s — the robot is physically parked, whatever
+        lidar odometry hallucinates (flat-floor crawler, no rolling)."""
+        return (self._effort_active_stamp is None or
+                stamp - self._effort_active_stamp
+                > self.p['actuation_idle_calm_s'])
+
     # ------------------------------------------------------------- scan --
     def _scan(self, msg):
         if self.pose is None:
@@ -325,7 +354,11 @@ class PersonTracker(Node):
                 self.robot_yaw_rate >= self.p['ego_calm_yaw_radps']):
             self._ego_active_stamp = stamp
         was_calm = self.ego_calm
-        self.ego_calm = (stamp - self._ego_active_stamp
+        # Actuation cross-check: zero drive effort => parked, whatever
+        # the odom-derived speed claims (person-near-parked-robot makes
+        # scan matching hallucinate ego motion; see the param note).
+        self.ego_calm = (self._actuation_idle(stamp) or
+                         stamp - self._ego_active_stamp
                          > self.p['ego_calm_settle_s'])
         # Travel rebasing (15:5x runs: ghosts confirmed right AFTER
         # maneuvers): position tracking keeps running while the robot
@@ -692,6 +725,16 @@ class PersonTracker(Node):
                     # evidence or a referee endorsement
                     walked_enough = (track.moving_time >=
                                      2.0 * self.p['min_moving_confirm_s'])
+                elif track.person_score < 0.10:
+                    # Referee-cold shape ANYWHERE, not just at known
+                    # furniture spots: stationary obstacles kept
+                    # confirming off attribution blips alone (user
+                    # 2026-07-23). Not a hard veto — DR-SPAAM misses
+                    # real people beyond ~4 m at this mount height — but
+                    # a shape the referee has never once endorsed must
+                    # sustain walking twice as long.
+                    walked_enough = (track.moving_time >=
+                                     2.0 * self.p['min_moving_confirm_s'])
                 if (track.travel >= needed and walked_enough
                         and stamp - track.born
                         >= self.p['min_track_age_confirm_s']):
@@ -863,7 +906,19 @@ class PersonTracker(Node):
                 if seconds_now - self.last_switch_stamp < 2.0:
                     return current
             if current.person_score > 0.35:
-                movers = []
+                # Seniority, SOFTENED (user 2026-07-24: don't follow a
+                # non-mover while someone else moves more): shape
+                # evidence still outranks a frame of motion — but it
+                # must not chain the robot to a statue. An endorsed
+                # target keeps followership against movers unless it
+                # has stood still twice the normal stale window AND the
+                # rival has walked an unfakeable distance (teleport
+                # gate makes 1.2 m unfakeable by furniture).
+                endorsed_stale = (
+                    self.last_scan_stamp is not None and
+                    self.last_scan_stamp - current.last_moving > 5.0)
+                movers = ([t for t in movers if t.travel > 1.2]
+                          if endorsed_stale else [])
             # RELATIVE override (14:07 run: a chair scored 0.39 — just
             # over the seniority bar — held followership for 36 s of
             # standing dead still while the walking user scored 0.96.
@@ -890,7 +945,11 @@ class PersonTracker(Node):
             self.last_switch_stamp = self.last_scan_stamp or 0.0
         endorsed = [t for t in confirmed if t.person_score > 0.35]
         moving = [t for t in confirmed if t.speed > 0.15]
-        pool = endorsed or moving or confirmed
+        # Fresh choice prefers MOTION (user 2026-07-24): a walking
+        # person outranks a static endorsed shape — endorsement breaks
+        # ties among movers, not the other way around.
+        moving_endorsed = [t for t in moving if t.person_score > 0.35]
+        pool = moving_endorsed or moving or endorsed or confirmed
         if self.pose is None:
             best = pool[0]
         else:
@@ -970,6 +1029,7 @@ class PersonTracker(Node):
         self.debug_pub.publish(String(data=json.dumps({
             'stamp': round(now, 3),
             'ego_calm': self.ego_calm,
+            'actuation_idle': self._actuation_idle(now),
             'robot_speed': round(self.robot_speed, 3),
             'robot_yaw_rate': round(self.robot_yaw_rate, 3),
             'followed_id': self.followed_id,
